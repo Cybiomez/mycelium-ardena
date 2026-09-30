@@ -26,6 +26,7 @@ from telegram.ext import (Application, CallbackQueryHandler, ChatMemberHandler, 
 from . import render
 from .daemon import Daemon, DaemonError
 from .db import Store
+from .sync import Sync
 from .tgio import Out
 from .turn import Turn
 
@@ -109,6 +110,8 @@ class ClaudeTG:
         self.models_cache: list = []
         self._header_at: dict[int, float] = {}
         self._listen_task = None
+        self.sync = Sync(self)
+        self._sync_task = None
         # Отправка хода и разбор событий — под одной блокировкой: иначе события нового хода
         # могут прийти раньше, чем бот узнает его номер, и начало ответа потеряется
         self.flow = asyncio.Lock()
@@ -133,12 +136,14 @@ class ClaudeTG:
         except DaemonError as e:
             log.error("ClaudeDaemon недоступен: %s — бот работает, ходы будут падать с ошибкой", e)
         self._listen_task = asyncio.create_task(self.daemon.listen(self.on_event, on_connect=self.reconcile))
+        self._sync_task = asyncio.create_task(self.sync.loop())
         log.info("бот @%s запущен, владелец %s, домашняя группа %s", self.username, self.cfg.owner_id,
                  self.cfg.home_chat_id)
 
     async def _post_shutdown(self, app):
-        if self._listen_task:
-            self._listen_task.cancel()
+        for task in (self._listen_task, self._sync_task):
+            if task:
+                task.cancel()
         await self.daemon.close()
 
     def run(self):
@@ -242,7 +247,9 @@ class ClaudeTG:
             t = self.store.topic_at(msg.chat.id, thread)
             if t:
                 t = self.store.update_topic(t["id"], title=msg.forum_topic_edited.name)
-                if t["session_id"] and not t["session_id"].startswith("new-"):
+                by_sync = thread in self.sync.renaming      # переименовал сам бот вслед за сессией
+                self.sync.renaming.discard(thread)
+                if not by_sync and t["session_id"] and not t["session_id"].startswith("new-"):
                     try:
                         await self.daemon.set_title(t["session_id"], t["title"])
                     except DaemonError as e:
@@ -734,7 +741,7 @@ class ClaudeTG:
         made = []
         if not self.store.topic_at(home, None):
             self.store.add_topic(home, None, "general", "General")
-        for kind, name in (("tgchat", "TGChat"), ("reminders", "🔔 Напоминания"), ("journal", "📋 Журнал")):
+        for kind, name in (("tgchat", "TGChat"),):
             if self.store.topic_by_kind(home, kind):
                 continue
             ft = await self.app.bot.create_forum_topic(home, name)
@@ -748,8 +755,10 @@ class ClaudeTG:
         await self.app.bot.set_my_commands([BotCommand(c, d) for c, d in MENU], scope=BotCommandScopeChat(home))
         await self.app.bot.set_my_commands([BotCommand(c, d) for c, d in MENU_PRIVATE],
                                            scope=BotCommandScopeChat(self.cfg.owner_id))
-        await reply("✅ Готово. " + (("Созданы темы: " + ", ".join(made) + ". ") if made else "Темы уже на месте. ")
-                    + "Меню команд обновлено.", html_mode=False)
+        await reply("✅ Готово. " + (("Создана тема: " + ", ".join(made) + ". ") if made else "TGChat на месте. ")
+                    + "Меню команд обновлено. Темы для рабочих сессий появятся в течение пары минут.",
+                    html_mode=False)
+        asyncio.create_task(self.sync.sync_topics())
 
     async def cmd_new(self, reply, name):
         name = (name or "").strip()[:128] or "Новая тема"
@@ -986,6 +995,7 @@ class ClaudeTG:
         t = self.store.topic_at(self.cfg.home_chat_id, ft.message_thread_id)
         t = self.store.update_topic(t["id"], session_id=session_id, pending_settings=None) if t else \
             self.store.add_topic(self.cfg.home_chat_id, ft.message_thread_id, "dialog", name, session_id=session_id)
+        self.sync.mark_bound(session_id)
         await self.ensure_header(t)
         lk = await self.daemon.lock(session_id)
         note = "\n⚠ Сессия сейчас открыта в VS Code или терминале — перед отправкой бот переспросит." if lk.get("locked") else ""
