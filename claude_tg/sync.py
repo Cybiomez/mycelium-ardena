@@ -137,10 +137,14 @@ class Sync:
             self.renaming.discard(t["thread_id"])
             log.warning("переименовать тему: %s", e)
 
-    # ---------- зеркало ходов из VS Code ----------
+    # ---------- зеркало ходов из VS Code (только по явному включению /mirror) ----------
     async def mirror_all(self):
         b = self.b
+        if not any(b.mirror_on(t["id"]) for t in b.store.dialog_topics(b.cfg.home_chat_id)):
+            return
         for t in b.store.dialog_topics(b.cfg.home_chat_id):
+            if not b.mirror_on(t["id"]):
+                continue
             sid = t["session_id"]
             if sid and not sid.startswith("new-"):
                 await self.mirror(t, sid)

@@ -43,6 +43,7 @@ HELP_HOME = (
     "/settings — модель и effort сессии\n"
     "/stop — прервать ход · /context — контекст и сжатие\n"
     "/rename Название — переименовать тему и сессию\n"
+    "/mirror on|off — дублировать в тему ходы из VS Code/чужих чатов\n"
     "/queue — очередь · /usage — лимиты подписки\n"
     "В General: /new Название · /attach · /topics · /defaults · /setup\n"
     "/panic — аварийный стоп (снять — только с бокса)"
@@ -61,7 +62,7 @@ HELP_PRIVATE = (
 )
 MENU = [
     ("settings", "Модель и effort сессии"), ("stop", "Прервать ход"), ("context", "Контекст и сжатие"),
-    ("queue", "Очередь"), ("usage", "Лимиты подписки"), ("rename", "Переименовать тему"),
+    ("queue", "Очередь"), ("usage", "Лимиты подписки"), ("rename", "Переименовать тему"), ("mirror", "Дублировать сюда ходы вне бота"),
     ("new", "Новая тема (в General)"), ("attach", "Подключить сессию (в General)"),
     ("topics", "Список тем"), ("defaults", "Настройки новых тем"), ("help", "Справка"),
 ]
@@ -198,6 +199,10 @@ class ClaudeTG:
     # =====================================================================
     def _is_owner(self, user) -> bool:
         return bool(user) and user.id == self.cfg.owner_id
+
+    def mirror_on(self, topic_id) -> bool:
+        """Включено ли для темы временное дублирование ходов из VS Code/чужих чатов (/mirror)."""
+        return bool(self.store.kv_get(f"mirror:{topic_id}", False))
 
     async def on_my_member(self, update: Update, ctx):
         """Бота добавил в чат не владелец — молча выходим (ТЗ §11 п. 1)."""
@@ -542,10 +547,10 @@ class ClaudeTG:
             await self.update_header(t, force=True)
 
     async def _final_mirror(self, turn, answer):
-        """Копия вопроса и ответа в тему TGChat с шапкой происхождения (ТЗ §4.2)."""
+        """Ход из чужого чата/инлайна. Копия в TGChat — только если для TGChat включён /mirror."""
         self._keep_thinking(turn)
         tg = self.store.topic_by_kind(self.cfg.home_chat_id, "tgchat")
-        if not tg:
+        if not tg or not self.mirror_on(tg["id"]):
             return
         p = turn.place
         if turn.inline_id:
@@ -771,6 +776,8 @@ class ClaudeTG:
             return await reply(*await self.settings_view(topic))
         if cmd == "rename":
             return await self.cmd_rename(reply, place, topic, args)
+        if cmd == "mirror":
+            return await self.cmd_mirror(reply, topic, args)
         if not session or session.startswith("new-"):
             return await reply("У этой темы ещё нет сессии — она появится с первым сообщением.", html_mode=False)
         if cmd == "stop":
@@ -871,6 +878,24 @@ class ClaudeTG:
         if topic["session_id"] and not topic["session_id"].startswith("new-"):
             await self.daemon.set_title(topic["session_id"], name)
         await reply(f"Сессия переименована: {name}", html_mode=False)
+
+    async def cmd_mirror(self, reply, topic, args):
+        """Временно дублировать в эту тему ходы, сделанные не через бота (VS Code, чужие чаты)."""
+        arg = (args or "").strip().lower()
+        key = f"mirror:{topic['id']}"
+        cur = self.mirror_on(topic["id"])
+        if arg not in ("on", "off", "вкл", "выкл", ""):
+            return await reply("Как пользоваться: /mirror on — включить дублирование в эту тему, "
+                               "/mirror off — выключить. Без аргумента — показать состояние.", html_mode=False)
+        if arg == "":
+            return await reply(f"Дублирование в эту тему: <b>{'включено' if cur else 'выключено'}</b>.")
+        on = arg in ("on", "вкл")
+        self.store.kv_set(key, on)
+        if on and topic["session_id"] and not topic["session_id"].startswith("new-"):
+            self.sync.mark_bound(topic["session_id"])   # начинаем с текущего момента, старое не выкладываем
+        where = "чужих чатов/инлайна" if topic["kind"] == "tgchat" else "VS Code/терминала"
+        await reply(f"{'🔁 Включил' if on else '⏸ Выключил'} дублирование ходов из {where} в эту тему."
+                    + (" Показываю только новые." if on else ""), html_mode=False)
 
     async def cmd_usage(self, reply):
         u = await self.daemon.usage()
@@ -1060,7 +1085,6 @@ class ClaudeTG:
         t = self.store.topic_at(self.cfg.home_chat_id, ft.message_thread_id)
         t = self.store.update_topic(t["id"], session_id=session_id, pending_settings=None) if t else \
             self.store.add_topic(self.cfg.home_chat_id, ft.message_thread_id, "dialog", name, session_id=session_id)
-        self.sync.mark_bound(session_id)
         await self.ensure_header(t)
         lk = await self.daemon.lock(session_id)
         note = "\n⚠ Сессия сейчас открыта в VS Code или терминале — перед отправкой бот переспросит." if lk.get("locked") else ""
