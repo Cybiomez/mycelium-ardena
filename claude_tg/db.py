@@ -40,6 +40,12 @@ class Store:
                 text TEXT,                         -- текст пересланного (с пометкой источника)
                 attachment TEXT                    -- JSON вложения демона (картинка/файл) или NULL
             );
+            CREATE TABLE IF NOT EXISTS live (
+                job_id INTEGER PRIMARY KEY,        -- живое сообщение хода: чтобы после рестарта
+                chat_id INTEGER NOT NULL,          -- не осталось висеть «Думаю…»
+                message_id INTEGER,
+                created_at INTEGER NOT NULL
+            );
         """)
 
     # ---------- kv ----------
@@ -74,7 +80,17 @@ class Store:
             (chat_id,)).fetchall()
 
     def add_topic(self, chat_id, thread_id, kind="dialog", title=None, session_id=None, pending=None):
-        # Если на этом месте висит архивная запись — место освобождаем (тему пересоздали)
+        # Уже есть живая запись на этом месте (гонка sync ↔ событие forum_topic_created) —
+        # не плодим дубль, а до-привязываем: проставляем session_id/title.
+        existing = self.topic_at(chat_id, thread_id)
+        if existing:
+            fields = {}
+            if session_id and not existing["session_id"]:
+                fields["session_id"] = session_id
+            if title and not (existing["title"] or "").strip():
+                fields["title"] = title
+            return self.update_topic(existing["id"], **fields) if fields else existing
+        # Освобождаем место от архивной записи (тему пересоздали)
         self.db.execute(
             "DELETE FROM topics WHERE chat_id = ? AND IFNULL(thread_id, 0) = IFNULL(?, 0) AND state = 'archived'",
             (chat_id, thread_id))
@@ -83,6 +99,25 @@ class Store:
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (chat_id, thread_id, kind, title, session_id, json.dumps(pending) if pending else None, int(time.time())))
         return self.topic(cur.lastrowid)
+
+    def topic_by_title(self, chat_id, title, kind="dialog"):
+        return self.db.execute(
+            "SELECT * FROM topics WHERE chat_id = ? AND kind = ? AND title = ? AND state != 'archived' ORDER BY id",
+            (chat_id, kind, title)).fetchall()
+
+    def delete_topic(self, topic_id):
+        self.db.execute("DELETE FROM topics WHERE id = ?", (topic_id,))
+
+    # ---------- живые сообщения (переживание рестарта) ----------
+    def live_add(self, job_id, chat_id, message_id):
+        self.db.execute("INSERT OR REPLACE INTO live (job_id, chat_id, message_id, created_at) VALUES (?, ?, ?, ?)",
+                        (job_id, chat_id, message_id, int(time.time())))
+
+    def live_del(self, job_id):
+        self.db.execute("DELETE FROM live WHERE job_id = ?", (job_id,))
+
+    def live_all(self):
+        return self.db.execute("SELECT * FROM live").fetchall()
 
     def update_topic(self, topic_id, **fields):
         if "pending_settings" in fields and fields["pending_settings"] is not None:

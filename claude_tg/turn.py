@@ -67,13 +67,15 @@ class Turn:
     """Живое сообщение одного хода. Цель — либо чат/тема, либо инлайн-сообщение."""
 
     def __init__(self, out, cfg, *, job_id, session_key, chat_id=None, thread_id=None,
-                 reply_to=None, inline_id=None, on_final=None):
+                 reply_to=None, inline_id=None, on_final=None, on_created=None, on_done=None):
         self.out, self.cfg = out, cfg
         self.job_id = job_id
         self.sessions = {session_key}
         self.chat_id, self.thread_id, self.reply_to = chat_id, thread_id, reply_to
         self.inline_id = inline_id
         self.on_final = on_final            # async fn(turn, answer_md) — копия в TGChat, шапка
+        self.on_created = on_created         # fn(turn) — запомнить живое сообщение (переживание рестарта)
+        self.on_done = on_done              # fn(turn) — забыть живое сообщение
         self.msg_id = None
         self.status = "⏳ Жду очереди"
         self.started = None
@@ -127,24 +129,27 @@ class Turn:
             await self._create()
 
     async def _create(self):
+        # Живое сообщение — беззвучное и НЕ ответ на сообщение человека: правка
+        # сообщения-ответа во многих клиентах шлёт уведомление на каждое изменение.
         m = await self.out.send(self.chat_id, self._live_html(), thread_id=self.thread_id,
-                                reply_to=self.reply_to, markup=self._stop_markup())
+                                markup=self._stop_markup(), silent=True)
         self.msg_id = m.message_id
         self._last_edit = time.time()
         self.dirty = False
+        if self.on_created:
+            try:
+                self.on_created(self)
+            except Exception:
+                log.exception("on_created хода %s", self.job_id)
         self._ticker = asyncio.create_task(self._tick())
 
     async def _tick(self):
-        """Правки не чаще min_edit_interval (лимиты Telegram); раз в 5 с — время хода."""
+        """Правки только при реальном изменении, не чаще min_edit_interval (лимиты Telegram).
+        Таймер хода сам по себе правку не вызывает — иначе лишний трафик и мигание."""
         interval = self.cfg.min_edit_interval * (2 if self.inline_id else 1)
-        last_clock = time.time()
         while not self.done:
             await asyncio.sleep(interval)
-            if self.done:
-                break
-            if time.time() - last_clock >= 5 and self.started:
-                self.dirty, last_clock = True, time.time()
-            if self.dirty:
+            if not self.done and self.dirty:
                 await self.flush()
 
     async def flush(self):
@@ -261,6 +266,11 @@ class Turn:
         self.done = True
         if self._ticker:
             self._ticker.cancel()
+        if self.on_done:
+            try:
+                self.on_done(self)
+            except Exception:
+                log.exception("on_done хода %s", self.job_id)
         answer = self.answer_md()
         async with self._lock:
             try:

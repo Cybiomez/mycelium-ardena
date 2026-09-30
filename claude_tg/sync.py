@@ -106,12 +106,20 @@ class Sync:
                 continue
             if sid in b.active or any(sid in tr.sessions for tr in b.turns.values()):
                 continue
-            await self._create(sid, title if title and title != "(без названия)" else f"Сессия {sid[:8]}")
+            name = title if title and title != "(без названия)" else f"Сессия {sid[:8]}"
+            twins = [r for r in b.store.topic_by_title(b.cfg.home_chat_id, name) if not r["session_id"]]
+            if twins:                       # пустая тема с таким именем уже есть — привяжем её, не создаём новую
+                b.store.update_topic(twins[0]["id"], session_id=sid, pending_settings=None)
+                self.mark_bound(sid)
+                await b.ensure_header(b.store.topic(twins[0]["id"]))
+                continue
+            await self._create(sid, name)
             await asyncio.sleep(CREATE_PAUSE)
 
     async def _create(self, sid, title):
         b = self.b
         ft = await b.out.call(b.app.bot.create_forum_topic, chat_id=b.cfg.home_chat_id, name=title[:128])
+        b.bot_created.add(ft.message_thread_id)   # событие forum_topic_created не должно завести дубль
         t = b.store.topic_at(b.cfg.home_chat_id, ft.message_thread_id)
         if t:
             t = b.store.update_topic(t["id"], session_id=sid, title=title[:128], pending_settings=None)

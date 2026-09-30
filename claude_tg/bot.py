@@ -45,7 +45,6 @@ HELP_HOME = (
     "/rename Название — переименовать тему и сессию\n"
     "/queue — очередь · /usage — лимиты подписки\n"
     "В General: /new Название · /attach · /topics · /defaults · /setup\n"
-    "/panel — обновить панель кнопок в General\n"
     "/panic — аварийный стоп (снять — только с бокса)"
 )
 HELP_FOREIGN = (
@@ -64,7 +63,7 @@ MENU = [
     ("settings", "Модель и effort сессии"), ("stop", "Прервать ход"), ("context", "Контекст и сжатие"),
     ("queue", "Очередь"), ("usage", "Лимиты подписки"), ("rename", "Переименовать тему"),
     ("new", "Новая тема (в General)"), ("attach", "Подключить сессию (в General)"),
-    ("topics", "Список тем"), ("defaults", "Настройки новых тем"), ("panel", "Панель в General"), ("help", "Справка"),
+    ("topics", "Список тем"), ("defaults", "Настройки новых тем"), ("help", "Справка"),
 ]
 MENU_PRIVATE = [("settings", "Модель и effort TGChat"), ("stop", "Прервать ход"), ("context", "Контекст"),
                 ("queue", "Очередь"), ("usage", "Лимиты подписки"), ("buffer", "Буфер контекста"), ("help", "Справка")]
@@ -108,6 +107,7 @@ class ClaudeTG:
         self.free_wait: dict[tuple, str] = {}     # (chat, thread) -> qid, ждём «свой ответ» текстом
         self.confirm: dict[str, dict] = {}        # uuid -> отложенный ход (сессия открыта в VS Code)
         self.albums: dict[str, list] = {}         # media_group_id -> сообщения альбома
+        self.bot_created: set[int] = set()        # thread_id тем, созданных самим ботом (гонка с событием)
         self.models_cache: list = []
         self._header_at: dict[int, float] = {}
         self._listen_task = None
@@ -136,10 +136,52 @@ class ClaudeTG:
             await self.daemon.health()
         except DaemonError as e:
             log.error("ClaudeDaemon недоступен: %s — бот работает, ходы будут падать с ошибкой", e)
+        try:
+            from telegram import MenuButtonCommands
+            await self.app.bot.set_chat_menu_button(chat_id=self.cfg.home_chat_id, menu_button=MenuButtonCommands())
+            await self.app.bot.set_chat_menu_button(chat_id=self.cfg.owner_id, menu_button=MenuButtonCommands())
+        except Exception as e:
+            log.warning("кнопка-меню: %s", e)
+        await self._recover_live()          # погасить «Думаю…», зависшие после прошлого рестарта
+        await self._sweep_duplicate_topics()
         self._listen_task = asyncio.create_task(self.daemon.listen(self.on_event, on_connect=self.reconcile))
         self._sync_task = asyncio.create_task(self.sync.loop())
         log.info("бот @%s запущен, владелец %s, домашняя группа %s", self.username, self.cfg.owner_id,
                  self.cfg.home_chat_id)
+
+    async def _recover_live(self):
+        """Живые сообщения ходов держатся в памяти; рестарт их теряет и «Думаю…» висит вечно.
+        При старте гасим все записанные живые сообщения понятным текстом."""
+        for row in self.store.live_all():
+            try:
+                await self.out.edit("⚠ Бот перезапускался — этот ход прерван. Повторите вопрос.",
+                                    chat_id=row["chat_id"], message_id=row["message_id"], html_mode=False)
+            except Exception as e:
+                log.debug("recover live %s: %s", row["job_id"], e)
+            self.store.live_del(row["job_id"])
+
+    async def _sweep_duplicate_topics(self):
+        """Одинаковые по имени темы: пустую (без сессии) удаляем, привязанную оставляем.
+        Страхует от гонки sync ↔ forum_topic_created (был дубль «Мой VPN»)."""
+        by_title = {}
+        for t in self.store.dialog_topics(self.cfg.home_chat_id):
+            if t["kind"] != "dialog":
+                continue
+            by_title.setdefault(t["title"], []).append(t)
+        for title, rows in by_title.items():
+            if len(rows) < 2:
+                continue
+            bound = [r for r in rows if r["session_id"]]
+            empty = [r for r in rows if not r["session_id"]]
+            drop = empty if bound else rows[1:]     # оставить одну (привязанную, иначе первую)
+            for r in drop:
+                try:
+                    await self.out.call(self.app.bot.delete_forum_topic, chat_id=r["chat_id"],
+                                        message_thread_id=r["thread_id"])
+                except Exception as e:
+                    log.warning("удалить дубль темы %s: %s", title, e)
+                self.store.delete_topic(r["id"])
+                log.info("удалён дубль темы «%s» (thread %s)", title, r["thread_id"])
 
     async def _post_shutdown(self, app):
         for task in (self._listen_task, self._sync_task):
@@ -239,6 +281,10 @@ class ClaudeTG:
         """Служебные события тем. True — сообщение обработано."""
         thread = msg.message_thread_id
         if msg.forum_topic_created:
+            # Тему создал сам бот (sync/cmd_new/attach) — строку он уже завёл, не дублируем
+            if thread in self.bot_created:
+                self.bot_created.discard(thread)
+                return True
             if not self.store.topic_at(msg.chat.id, thread):
                 t = self.store.add_topic(msg.chat.id, thread, "dialog", msg.forum_topic_created.name,
                                          pending=self.store.kv_get("defaults"))
@@ -477,7 +523,9 @@ class ClaudeTG:
         on_final = self._final_home if place.kind == "home" else self._final_mirror
         turn = Turn(self.out, self.cfg, job_id=job, session_key=res["sessionKey"],
                     chat_id=None if inline_id else place.chat_id, thread_id=place.thread_id,
-                    reply_to=None if inline_id else place.reply_to, inline_id=inline_id, on_final=on_final)
+                    reply_to=None if inline_id else place.reply_to, inline_id=inline_id, on_final=on_final,
+                    on_created=lambda t: self.store.live_add(t.job_id, t.chat_id, t.msg_id),
+                    on_done=lambda t: self.store.live_del(t.job_id))
         turn.place, turn.question, turn.inline_type = place, question, inline_type
         turn.topic_id = topic["id"] if topic else None
         self.turns[job] = turn
@@ -693,11 +741,6 @@ class ClaudeTG:
         if cmd in ("help", "start"):
             text = {"home": HELP_HOME, "foreign": HELP_FOREIGN, "private": HELP_PRIVATE}[place.kind]
             return await reply(text.replace("{bot}", self.username))
-        if cmd == "panel":
-            if place.kind != "home":
-                return await reply("/panel — в домашней группе.", html_mode=False)
-            await self.post_panel()
-            return await reply("Панель обновлена и закреплена в General.", html_mode=False)
         if cmd == "setup":
             if not general:
                 return await reply("/setup — в General домашней группы.", html_mode=False)
@@ -765,67 +808,24 @@ class ClaudeTG:
         await reply("✅ Готово. " + (("Создана тема: " + ", ".join(made) + ". ") if made else "TGChat на месте. ")
                     + "Меню команд обновлено. Темы для рабочих сессий появятся в течение пары минут.",
                     html_mode=False)
-        await self.post_panel()
-        asyncio.create_task(self.sync.sync_topics())
-
-    # ---------- панель кнопок в General (ТЗ §4.1) ----------
-    def _panel_markup(self):
-        b = InlineKeyboardButton
-        return InlineKeyboardMarkup([
-            [b("➕ Новая тема", callback_data="gp:new"), b("🔗 Подключить сессию", callback_data="gp:attach")],
-            [b("📋 Темы", callback_data="gp:topics"), b("⏳ Очередь", callback_data="gp:queue"),
-             b("📊 Лимиты", callback_data="gp:usage")],
-            [b("⚙ Настройки новых тем", callback_data="gp:defaults"), b("❓ Справка", callback_data="gp:help")],
-            [b("🔒 Аварийный стоп", callback_data="gp:panic")],
-        ])
-
-    async def post_panel(self):
-        """Закреплённая панель управления в General. Одна на группу — старую перезакрепляем."""
-        home = self.cfg.home_chat_id
-        text = ("🎛 <b>Панель управления</b>\n"
-                "Здесь — команды, уведомления и техническая мелочь; разговоры — в темах "
-                "(каждая тема = отдельная сессия Claude).")
-        pid = self.store.kv_get("panel_msg")
-        if pid:
+        # Кнопка-меню бота («кубики» у поля ввода) → всплывающий список команд
+        from telegram import MenuButtonCommands
+        await self.app.bot.set_chat_menu_button(chat_id=home, menu_button=MenuButtonCommands())
+        await self.app.bot.set_chat_menu_button(chat_id=self.cfg.owner_id, menu_button=MenuButtonCommands())
+        # Убрать старую закреплённую панель-сообщение, если осталась от прошлой версии
+        old = self.store.kv_get("panel_msg")
+        if old:
             try:
-                await self.out.edit(text, chat_id=home, message_id=pid, markup=self._panel_markup())
-                return
+                await self.app.bot.delete_message(home, old)
             except Exception:
                 pass
-        m = await self.out.send(home, text, markup=self._panel_markup(), silent=True)
-        self.store.kv_set("panel_msg", m.message_id)
-        try:
-            await self.out.call(self.app.bot.pin_chat_message, chat_id=home, message_id=m.message_id,
-                                disable_notification=True)
-        except Exception as e:
-            log.warning("закрепить панель: %s", e)
-
-    async def on_panel_button(self, cq, action):
-        """Кнопка панели = соответствующая команда, ответ — в General."""
-        place = Place("home", self.cfg.home_chat_id, None, None, self.store.topic_at(self.cfg.home_chat_id, None))
-        await cq.answer()
-        if action == "new":
-            return await self.cmd_new(lambda t, m=None, **k: self.out.send(self.cfg.home_chat_id, t, markup=m, **k),
-                                      "Новая тема")
-        if action == "attach":
-            return await self.cmd_attach(lambda t, m=None, **k: self.out.send(self.cfg.home_chat_id, t, markup=m, **k))
-        reply = lambda t, m=None, html_mode=True: self.out.send(self.cfg.home_chat_id, t, markup=m, html_mode=html_mode)
-        if action == "topics":
-            return await self.cmd_topics(reply)
-        if action == "queue":
-            return await self.cmd_queue(reply)
-        if action == "usage":
-            return await self.cmd_usage(reply)
-        if action == "defaults":
-            return await reply(*await self.settings_view(None))
-        if action == "help":
-            return await reply(HELP_HOME.replace("{bot}", self.username))
-        if action == "panic":
-            return await self.cmd_panic(reply)
+            self.store.kv_set("panel_msg", None)
+        asyncio.create_task(self.sync.sync_topics())
 
     async def cmd_new(self, reply, name):
         name = (name or "").strip()[:128] or "Новая тема"
         ft = await self.out.call(self.app.bot.create_forum_topic, chat_id=self.cfg.home_chat_id, name=name)
+        self.bot_created.add(ft.message_thread_id)
         t = self.store.topic_at(self.cfg.home_chat_id, ft.message_thread_id) or \
             self.store.add_topic(self.cfg.home_chat_id, ft.message_thread_id, "dialog", name,
                                  pending=self.store.kv_get("defaults"))
@@ -996,8 +996,6 @@ class ClaudeTG:
         data = cq.data or ""
         kind, _, rest = data.partition(":")
         try:
-            if kind == "gp":
-                return await self.on_panel_button(cq, rest)
             if kind == "noop":
                 return await cq.answer()
             if kind == "stop":
@@ -1059,6 +1057,7 @@ class ClaudeTG:
             return await cq.answer("Уже привязана к теме", show_alert=True)
         name = (s.get("title") or "Сессия")[:128]
         ft = await self.out.call(self.app.bot.create_forum_topic, chat_id=self.cfg.home_chat_id, name=name)
+        self.bot_created.add(ft.message_thread_id)
         t = self.store.topic_at(self.cfg.home_chat_id, ft.message_thread_id)
         t = self.store.update_topic(t["id"], session_id=session_id, pending_settings=None) if t else \
             self.store.add_topic(self.cfg.home_chat_id, ft.message_thread_id, "dialog", name, session_id=session_id)
