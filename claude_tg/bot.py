@@ -660,7 +660,8 @@ class ClaudeTG:
                                 silent=True)
         self.store.update_topic(topic["id"], header_msg_id=m.message_id)
         try:
-            await self.app.bot.pin_chat_message(topic["chat_id"], m.message_id, disable_notification=True)
+            await self.out.call(self.app.bot.pin_chat_message, chat_id=topic["chat_id"], message_id=m.message_id,
+                                    disable_notification=True)
         except Exception as e:
             log.warning("закрепить шапку: %s", e)
 
@@ -744,7 +745,7 @@ class ClaudeTG:
         for kind, name in (("tgchat", "TGChat"),):
             if self.store.topic_by_kind(home, kind):
                 continue
-            ft = await self.app.bot.create_forum_topic(home, name)
+            ft = await self.out.call(self.app.bot.create_forum_topic, chat_id=home, name=name)
             session = os.environ.get("CLAUDE_TG_TGCHAT_SESSION") if kind == "tgchat" else None
             t = self.store.add_topic(home, ft.message_thread_id, kind, name, session_id=session or None)
             await self.ensure_header(t)
@@ -762,7 +763,7 @@ class ClaudeTG:
 
     async def cmd_new(self, reply, name):
         name = (name or "").strip()[:128] or "Новая тема"
-        ft = await self.app.bot.create_forum_topic(self.cfg.home_chat_id, name)
+        ft = await self.out.call(self.app.bot.create_forum_topic, chat_id=self.cfg.home_chat_id, name=name)
         t = self.store.topic_at(self.cfg.home_chat_id, ft.message_thread_id) or \
             self.store.add_topic(self.cfg.home_chat_id, ft.message_thread_id, "dialog", name,
                                  pending=self.store.kv_get("defaults"))
@@ -991,7 +992,7 @@ class ClaudeTG:
         if any(r["session_id"] == session_id for r in self.store.dialog_topics(self.cfg.home_chat_id)):
             return await cq.answer("Уже привязана к теме", show_alert=True)
         name = (s.get("title") or "Сессия")[:128]
-        ft = await self.app.bot.create_forum_topic(self.cfg.home_chat_id, name)
+        ft = await self.out.call(self.app.bot.create_forum_topic, chat_id=self.cfg.home_chat_id, name=name)
         t = self.store.topic_at(self.cfg.home_chat_id, ft.message_thread_id)
         t = self.store.update_topic(t["id"], session_id=session_id, pending_settings=None) if t else \
             self.store.add_topic(self.cfg.home_chat_id, ft.message_thread_id, "dialog", name, session_id=session_id)

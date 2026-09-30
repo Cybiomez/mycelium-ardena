@@ -57,6 +57,10 @@ class Out:
                 raise
         raise RuntimeError("Telegram: не удалось после повторов")
 
+    async def call(self, fn, **kw):
+        """Любой метод Bot API с ожиданием по RetryAfter (создание тем, закрепление…)."""
+        return await self._call(fn, **kw)
+
     async def send(self, chat_id, text, thread_id=None, reply_to=None, markup=None, html_mode=True, silent=None):
         kw = dict(chat_id=chat_id, text=text, link_preview_options=NO_PREVIEW,
                   disable_notification=self.silent() if silent is None else silent)

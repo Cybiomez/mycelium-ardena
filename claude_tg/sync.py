@@ -21,7 +21,7 @@ log = logging.getLogger(__name__)
 
 SYNC_EVERY = 60        # с — сверка списка сессий
 MIRROR_EVERY = 15      # с — проверка новых ходов из VS Code
-CREATE_PAUSE = 3       # с между созданием тем (лимиты Telegram на группу)
+CREATE_PAUSE = 6       # с между созданием тем (лимиты Telegram на группу)
 _INJECTED = re.compile(r"^\s*<(task-notification|local-command-[a-z]+|command-(?:name|message|args)|system-reminder|channel-context)[\s>]")
 
 
@@ -111,7 +111,7 @@ class Sync:
 
     async def _create(self, sid, title):
         b = self.b
-        ft = await b.app.bot.create_forum_topic(b.cfg.home_chat_id, title[:128])
+        ft = await b.out.call(b.app.bot.create_forum_topic, chat_id=b.cfg.home_chat_id, name=title[:128])
         t = b.store.topic_at(b.cfg.home_chat_id, ft.message_thread_id)
         if t:
             t = b.store.update_topic(t["id"], session_id=sid, title=title[:128], pending_settings=None)
@@ -124,7 +124,7 @@ class Sync:
     async def _rename(self, t, title):
         self.renaming.add(t["thread_id"])
         try:
-            await self.b.app.bot.edit_forum_topic(t["chat_id"], t["thread_id"], name=title)
+            await self.b.out.call(self.b.app.bot.edit_forum_topic, chat_id=t["chat_id"], message_thread_id=t["thread_id"], name=title)
         except Exception as e:
             self.renaming.discard(t["thread_id"])
             log.warning("переименовать тему: %s", e)
