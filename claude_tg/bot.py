@@ -45,6 +45,7 @@ HELP_HOME = (
     "/rename Название — переименовать тему и сессию\n"
     "/queue — очередь · /usage — лимиты подписки\n"
     "В General: /new Название · /attach · /topics · /defaults · /setup\n"
+    "/panel — обновить панель кнопок в General\n"
     "/panic — аварийный стоп (снять — только с бокса)"
 )
 HELP_FOREIGN = (
@@ -63,7 +64,7 @@ MENU = [
     ("settings", "Модель и effort сессии"), ("stop", "Прервать ход"), ("context", "Контекст и сжатие"),
     ("queue", "Очередь"), ("usage", "Лимиты подписки"), ("rename", "Переименовать тему"),
     ("new", "Новая тема (в General)"), ("attach", "Подключить сессию (в General)"),
-    ("topics", "Список тем"), ("defaults", "Настройки новых тем"), ("help", "Справка"),
+    ("topics", "Список тем"), ("defaults", "Настройки новых тем"), ("panel", "Панель в General"), ("help", "Справка"),
 ]
 MENU_PRIVATE = [("settings", "Модель и effort TGChat"), ("stop", "Прервать ход"), ("context", "Контекст"),
                 ("queue", "Очередь"), ("usage", "Лимиты подписки"), ("buffer", "Буфер контекста"), ("help", "Справка")]
@@ -692,6 +693,11 @@ class ClaudeTG:
         if cmd in ("help", "start"):
             text = {"home": HELP_HOME, "foreign": HELP_FOREIGN, "private": HELP_PRIVATE}[place.kind]
             return await reply(text.replace("{bot}", self.username))
+        if cmd == "panel":
+            if place.kind != "home":
+                return await reply("/panel — в домашней группе.", html_mode=False)
+            await self.post_panel()
+            return await reply("Панель обновлена и закреплена в General.", html_mode=False)
         if cmd == "setup":
             if not general:
                 return await reply("/setup — в General домашней группы.", html_mode=False)
@@ -759,7 +765,63 @@ class ClaudeTG:
         await reply("✅ Готово. " + (("Создана тема: " + ", ".join(made) + ". ") if made else "TGChat на месте. ")
                     + "Меню команд обновлено. Темы для рабочих сессий появятся в течение пары минут.",
                     html_mode=False)
+        await self.post_panel()
         asyncio.create_task(self.sync.sync_topics())
+
+    # ---------- панель кнопок в General (ТЗ §4.1) ----------
+    def _panel_markup(self):
+        b = InlineKeyboardButton
+        return InlineKeyboardMarkup([
+            [b("➕ Новая тема", callback_data="gp:new"), b("🔗 Подключить сессию", callback_data="gp:attach")],
+            [b("📋 Темы", callback_data="gp:topics"), b("⏳ Очередь", callback_data="gp:queue"),
+             b("📊 Лимиты", callback_data="gp:usage")],
+            [b("⚙ Настройки новых тем", callback_data="gp:defaults"), b("❓ Справка", callback_data="gp:help")],
+            [b("🔒 Аварийный стоп", callback_data="gp:panic")],
+        ])
+
+    async def post_panel(self):
+        """Закреплённая панель управления в General. Одна на группу — старую перезакрепляем."""
+        home = self.cfg.home_chat_id
+        text = ("🎛 <b>Панель управления</b>\n"
+                "Здесь — команды, уведомления и техническая мелочь; разговоры — в темах "
+                "(каждая тема = отдельная сессия Claude).")
+        pid = self.store.kv_get("panel_msg")
+        if pid:
+            try:
+                await self.out.edit(text, chat_id=home, message_id=pid, markup=self._panel_markup())
+                return
+            except Exception:
+                pass
+        m = await self.out.send(home, text, markup=self._panel_markup(), silent=True)
+        self.store.kv_set("panel_msg", m.message_id)
+        try:
+            await self.out.call(self.app.bot.pin_chat_message, chat_id=home, message_id=m.message_id,
+                                disable_notification=True)
+        except Exception as e:
+            log.warning("закрепить панель: %s", e)
+
+    async def on_panel_button(self, cq, action):
+        """Кнопка панели = соответствующая команда, ответ — в General."""
+        place = Place("home", self.cfg.home_chat_id, None, None, self.store.topic_at(self.cfg.home_chat_id, None))
+        await cq.answer()
+        if action == "new":
+            return await self.cmd_new(lambda t, m=None, **k: self.out.send(self.cfg.home_chat_id, t, markup=m, **k),
+                                      "Новая тема")
+        if action == "attach":
+            return await self.cmd_attach(lambda t, m=None, **k: self.out.send(self.cfg.home_chat_id, t, markup=m, **k))
+        reply = lambda t, m=None, html_mode=True: self.out.send(self.cfg.home_chat_id, t, markup=m, html_mode=html_mode)
+        if action == "topics":
+            return await self.cmd_topics(reply)
+        if action == "queue":
+            return await self.cmd_queue(reply)
+        if action == "usage":
+            return await self.cmd_usage(reply)
+        if action == "defaults":
+            return await reply(*await self.settings_view(None))
+        if action == "help":
+            return await reply(HELP_HOME.replace("{bot}", self.username))
+        if action == "panic":
+            return await self.cmd_panic(reply)
 
     async def cmd_new(self, reply, name):
         name = (name or "").strip()[:128] or "Новая тема"
@@ -934,6 +996,10 @@ class ClaudeTG:
         data = cq.data or ""
         kind, _, rest = data.partition(":")
         try:
+            if kind == "gp":
+                return await self.on_panel_button(cq, rest)
+            if kind == "noop":
+                return await cq.answer()
             if kind == "stop":
                 turn = self.turns.get(int(rest))
                 if turn:
