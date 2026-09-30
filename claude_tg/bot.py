@@ -136,9 +136,8 @@ class ClaudeTG:
             await self.daemon.health()
         except DaemonError as e:
             log.error("ClaudeDaemon недоступен: %s — бот работает, ходы будут падать с ошибкой", e)
-        try:
+        try:   # кнопка-меню бота — только для личного чата; в группе команды видны по «/»
             from telegram import MenuButtonCommands
-            await self.app.bot.set_chat_menu_button(chat_id=self.cfg.home_chat_id, menu_button=MenuButtonCommands())
             await self.app.bot.set_chat_menu_button(chat_id=self.cfg.owner_id, menu_button=MenuButtonCommands())
         except Exception as e:
             log.warning("кнопка-меню: %s", e)
@@ -808,9 +807,9 @@ class ClaudeTG:
         await reply("✅ Готово. " + (("Создана тема: " + ", ".join(made) + ". ") if made else "TGChat на месте. ")
                     + "Меню команд обновлено. Темы для рабочих сессий появятся в течение пары минут.",
                     html_mode=False)
-        # Кнопка-меню бота («кубики» у поля ввода) → всплывающий список команд
+        # Кнопка-меню бота в личке владельца → всплывающий список команд.
+        # В группе кнопку-меню задать нельзя (chat_id группы недопустим) — там команды по «/».
         from telegram import MenuButtonCommands
-        await self.app.bot.set_chat_menu_button(chat_id=home, menu_button=MenuButtonCommands())
         await self.app.bot.set_chat_menu_button(chat_id=self.cfg.owner_id, menu_button=MenuButtonCommands())
         # Убрать старую закреплённую панель-сообщение, если осталась от прошлой версии
         old = self.store.kv_get("panel_msg")
