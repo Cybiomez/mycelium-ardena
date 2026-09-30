@@ -1,0 +1,10 @@
+{
+  "id": "mycelium-claude-tg",
+  "name": "ClaudeTG",
+  "mark": "#D97757",
+  "description": "Telegram-бот для работы с Claude: темы супергруппы = сессии ClaudeDaemon, TGChat, инлайн-режим.",
+  "location": "Бокс",
+  "mechanism": "systemd (постоянно)",
+  "schedule": "постоянно",
+  "check": { "type": "systemd", "scope": "system", "unit": "mycelium-claude-tg.service" }
+}
