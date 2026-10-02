@@ -112,14 +112,10 @@ class Turn:
         return " · ".join(parts)
 
     def _live_html(self):
-        head = f"<i>{render.esc(self._status_line())}</i>"
-        preview = self.stream.strip()
-        if not preview:
-            return head
-        if len(preview) > 3000:     # показываем хвост; если разрезали блок кода — переоткрываем его
-            cut = preview[:-3000]
-            preview = ("```\n" if cut.count("```") % 2 else "") + "…" + preview[-3000:]
-        return head + "\n\n" + render.to_html(preview)
+        # Только короткая строка состояния. Текст ответа на ходу НЕ дописываем:
+        # растущее сообщение прокручивает страницу, и начало не прочитать (просьба Алексея).
+        # Ответ показывается целиком и сразу в finalize.
+        return f"<i>{render.esc(self._status_line())}</i>"
 
     async def ensure_message(self):
         """Создать живое сообщение (для темы/чата). У инлайна оно уже есть."""
