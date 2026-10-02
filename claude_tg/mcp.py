@@ -148,6 +148,7 @@ class McpServer:
             if method == "tools/list":
                 return _ok(mid, {"tools": TOOLS})
             if method == "tools/call":
+                log.info("MCP %s от сессии %s", params.get("name"), (caller or "—")[:8])
                 text, is_err = await self.call(params.get("name"), params.get("arguments") or {}, caller)
                 return _ok(mid, {"content": [{"type": "text", "text": text}], "isError": is_err})
             return _err(mid, -32601, f"нет метода {method}")
