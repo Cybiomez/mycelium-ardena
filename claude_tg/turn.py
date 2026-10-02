@@ -284,12 +284,6 @@ class Turn:
 
     async def _final_inline(self, answer):
         body = answer
-        # Собеседник не видит вопроса Алексея. Модель просим начинать с заголовка по смыслу;
-        # не начала — подставляем укороченный вопрос. Ошибку/пустой ответ не трогаем.
-        first = next((l.strip() for l in body.splitlines() if l.strip()), "")
-        q = " ".join((getattr(self, "question", "") or "").split())
-        if q and not self.error and not first.startswith(("**", "#")):
-            body = f"**{_short(q, 70)}**\n\n{body}"
         if len(body) > INLINE_BUDGET:
             cut = body.rfind("\n\n", 0, INLINE_BUDGET)
             body = body[: cut if cut > INLINE_BUDGET // 2 else INLINE_BUDGET] + "\n\n_…полностью — в TGChat_"
