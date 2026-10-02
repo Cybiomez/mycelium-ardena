@@ -99,7 +99,7 @@ class Planner:
         b = InlineKeyboardButton
         rows = [[b("✅ Сделано", callback_data=f"rmd:done:{rid}"), b("⏰ +1 ч", callback_data=f"rmd:h1:{rid}")],
                 [b("🕐 Позже", callback_data=f"rmd:pick:{rid}:0"), b("📅 Завтра", callback_data=f"rmd:pick:{rid}:1")]]
-        last = [b("🗑 Удалить", callback_data=f"rmd:del:{rid}")]
+        last = [b("🗑 Удалить", callback_data=f"rmd:ask:{rid}")]
         if r["note"]:
             last.insert(0, b("📄 Показать заметку", callback_data=f"rmd:note:{rid}"))
         rows.append(last)
@@ -226,10 +226,25 @@ class Planner:
                 b.store.rem_update(rid, state="done")
             await self._close(msg, f"✅ <s>{render.esc(r['text'])}</s>")
             return await cq.answer("Отмечено")
-        if action == "del":
+        if action in ("ask", "del"):          # «del» — кнопка старых сообщений: тоже через подтверждение
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Да, удалить", callback_data=f"rmd:delyes:{rid}"),
+                                        InlineKeyboardButton("Нет", callback_data=f"rmd:no:{rid}")]])
+            await b.out.call(b.app.bot.edit_message_reply_markup, chat_id=msg.chat.id,
+                             message_id=msg.message_id, reply_markup=kb)
+            return await cq.answer("Точно удалить?")
+        if action == "delyes":
             b.store.rem_update(rid, state="cancelled")
             await self._close(msg, f"🗑 <s>{render.esc(r['text'])}</s> — удалено")
             return await cq.answer("Удалено")
+        if action == "no":                    # вернуть кнопки: у самого напоминания — основные, у итога мастера — свои
+            if r["msg_id"] == msg.message_id:
+                kb = self._markup(r)
+            else:
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Удалить", callback_data=f"rmd:ask:{rid}"),
+                                            InlineKeyboardButton("📋 Все напоминания", callback_data="rl:list")]])
+            await b.out.call(b.app.bot.edit_message_reply_markup, chat_id=msg.chat.id,
+                             message_id=msg.message_id, reply_markup=kb)
+            return await cq.answer("Оставил")
         if action == "h1":
             await self._snooze(msg, r, now + timedelta(hours=1))
             return await cq.answer("Перенесено на час")

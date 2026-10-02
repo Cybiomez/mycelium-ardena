@@ -30,6 +30,7 @@ from .mcp import McpServer
 from .planner import Planner
 from .sync import Sync
 from .tgio import Out
+from .wizard import Wizard
 from .turn import Turn
 
 log = logging.getLogger(__name__)
@@ -47,8 +48,8 @@ HELP_HOME = (
     "/rename Название — переименовать тему и сессию\n"
     "/mirror on|off — дублировать в тему ходы из VS Code/чужих чатов\n"
     "/queue — очередь · /usage — лимиты подписки\n"
-    "/remind когда текст — напоминание (в теме — сюда, иначе в TGChat)\n"
-    "/task когда что сделать — задание мне по расписанию · /reminders — список\n"
+    "/remind — новое напоминание: выбор даты и времени кнопками (или быстро: /remind завтра 9:00 текст)\n"
+    "/task — задание мне по расписанию, так же · /reminders — список, удаление\n"
     "В General: /new Название · /attach · /topics · /defaults · /setup\n"
     "/panic — аварийный стоп (снять — только с бокса)"
 )
@@ -68,7 +69,7 @@ MENU = [
     ("settings", "Модель и effort сессии"), ("stop", "Прервать ход"), ("context", "Контекст и сжатие"),
     ("queue", "Очередь"), ("usage", "Лимиты подписки"), ("rename", "Переименовать тему"), ("mirror", "Дублировать сюда ходы вне бота"),
     ("new", "Новая тема (в General)"), ("attach", "Подключить сессию (в General)"),
-    ("remind", "Напомнить: /remind завтра 9:00 текст"), ("task", "Задание себе по расписанию"),
+    ("remind", "Новое напоминание (кнопками)"), ("task", "Задание мне по расписанию"),
     ("reminders", "Напоминания и задания"), ("topics", "Список тем"), ("defaults", "Настройки новых тем"), ("help", "Справка"),
 ]
 MENU_PRIVATE = [("settings", "Модель и effort TGChat"), ("stop", "Прервать ход"), ("context", "Контекст"),
@@ -121,6 +122,7 @@ class ClaudeTG:
         self.sync = Sync(self)
         self._sync_task = None
         self.planner = Planner(self)
+        self.wizard = Wizard(self)
         self._planner_task = None
         self.mcp = McpServer(self, int(os.environ.get("CLAUDE_TG_MCP_PORT", "8790")))
         # Отправка хода и разбор событий — под одной блокировкой: иначе события нового хода
@@ -151,6 +153,7 @@ class ClaudeTG:
             await self.app.bot.set_chat_menu_button(chat_id=self.cfg.owner_id, menu_button=MenuButtonCommands())
         except Exception as e:
             log.warning("кнопка-меню: %s", e)
+        await self._apply_menu()
         await self._recover_live()          # погасить «Думаю…», зависшие после прошлого рестарта
         await self._sweep_duplicate_topics()
         self._listen_task = asyncio.create_task(self.daemon.listen(self.on_event, on_connect=self.reconcile))
@@ -162,6 +165,18 @@ class ClaudeTG:
             log.error("MCP-сервер не поднялся (порт занят?): %s — напоминания из сессий работать не будут", e)
         log.info("бот @%s запущен, владелец %s, домашняя группа %s", self.username, self.cfg.owner_id,
                  self.cfg.home_chat_id)
+
+    async def _apply_menu(self):
+        """Меню команд «/» — при каждом старте, а не только при /setup: иначе новые команды
+        не появляются у Алексея, пока он сам не вызовет /setup. В чужих чатах меню нет."""
+        try:
+            await self.app.bot.delete_my_commands(scope=BotCommandScopeDefault())
+            await self.app.bot.set_my_commands([BotCommand(c, d) for c, d in MENU],
+                                               scope=BotCommandScopeChat(self.cfg.home_chat_id))
+            await self.app.bot.set_my_commands([BotCommand(c, d) for c, d in MENU_PRIVATE],
+                                               scope=BotCommandScopeChat(self.cfg.owner_id))
+        except Exception as e:
+            log.warning("меню команд: %s", e)
 
     async def _recover_live(self):
         """Живые сообщения ходов держатся в памяти; рестарт их теряет и «Думаю…» висит вечно.
@@ -250,6 +265,9 @@ class ClaudeTG:
                 await self.out.send(chat.id, "🔒 Бот заблокирован командой /panic. Снять — на боксе: "
                                     "<code>claude-tg unlock</code>", thread_id=self._thread(msg))
             return
+        wid = self.wizard.wants_text(msg)
+        if wid and not (text.strip().startswith("/") or (self._tagged(text) and self._untag(text).startswith("/"))):
+            return await self.wizard.take_text(msg, wid, self._untag(text) if self._tagged(text) else text)
         if msg.media_group_id and not await self._album_first(msg):
             return
         if chat.type == ChatType.PRIVATE:
@@ -924,44 +942,91 @@ class ClaudeTG:
                     + (" Показываю только новые." if on else ""), html_mode=False)
 
     async def cmd_remind(self, reply, place, args, kind="remind"):
-        """/remind <когда> <текст> — в теме-диалоге уходит в эту тему, иначе в TGChat.
-        /task <когда> <что сделать> — задание себе: в срок промпт уйдёт в сессию темы."""
+        """/remind — мастер на кнопках. Быстрая форма: /remind завтра 9:00 текст.
+        Не поняли — сразу открываем мастер с подсказкой, а не оставляем человека гадать."""
         from . import schedule
         if not args.strip():
-            ex = "/remind завтра 9:00 Заготовить курицу" if kind == "remind" else "/task по будням 9:00 проверь бэкап и доложи"
-            return await reply("Формат: <code>" + render.esc(ex) + "</code>\nВремя: «через 2 часа», «в пятницу 10:00», "
-                               "«03.10 18:30», «каждый день 9:00», «по будням 9:00», «по пн,чт 18:00».")
+            return await self.wizard.start(place, kind)
         try:
             due, repeat, text = schedule.parse(args, self.cfg.tz)
         except schedule.ParseError as e:
-            return await reply(f"⚠ {e}", html_mode=False)
+            return await self.wizard.start(place, kind, note_text=f"Не понял время в «{args.strip()[:60]}» ({e}). "
+                                           "Выберите кнопками ниже — или отправьте команду заново, "
+                                           "например: /remind завтра 9:00 купить билет")
         if not text:
-            return await reply("После времени нужен текст: что напомнить.", html_mode=False)
+            return await self.wizard.start(place, kind, note_text="После времени не было текста. "
+                                           "Выберите время кнопками, текст попрошу в конце.")
         topic = place.topic if place.kind == "home" and place.topic and place.topic["kind"] == "dialog" else None
         if kind == "task" and not topic:
             topic = self.store.topic_by_kind(self.cfg.home_chat_id, "tgchat")
             if not topic:
-                return await reply("Тема TGChat не настроена: /setup в домашней группе.", html_mode=False)
-        r = self.planner.create(kind, text, due, repeat=repeat, topic_id=topic["id"] if topic and topic["kind"] == "dialog" else None,
-                                source="user")
-        await reply(("🔔 Напомню" if kind == "remind" else "🤖 Задание запланировано:") +
-                    f" {render.esc(self.planner.describe(r))}")
+                return await reply("Тема TGChat не настроена: отправьте /setup в General домашней группы.",
+                                   html_mode=False)
+        r = self.planner.create(kind, text, due, repeat=repeat,
+                                topic_id=topic["id"] if topic and topic["kind"] == "dialog" else None, source="user")
+        rep_ = schedule.describe_repeat(repeat)
+        head = "🔔 Готово, напомню" if kind == "remind" else "🤖 Готово, задание запланировано"
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Удалить", callback_data=f"rmd:ask:{r['id']}"),
+                                    InlineKeyboardButton("📋 Все напоминания", callback_data="rl:list")]])
+        await reply(f"{head}: <b>{render.esc(schedule.fmt(due, self.cfg.tz))}</b>"
+                    f"{' (' + render.esc(rep_) + ')' if rep_ else ''}\n"
+                    f"Куда: {render.esc(self.planner.where_name(r))}\n«{render.esc(text)}»", kb)
 
-    async def cmd_reminders(self, reply):
-        rows = self.store.rem_active()
+    def render_reminders(self):
+        """Список для человека: порядковые номера, удаление с подтверждением, «➕ Новое»."""
+        rows = self.store.rem_active()[:15]
+        b = InlineKeyboardButton
         if not rows:
-            return await reply("Активных напоминаний и заданий нет.", html_mode=False)
-        rows = rows[:15]
+            return ("Активных напоминаний и заданий нет.",
+                    InlineKeyboardMarkup([[b("➕ Новое напоминание", callback_data="rl:new")]]))
         kb, line = [], []
-        for n, r in enumerate(rows, 1):        # кнопка по номеру в списке; внутри — настоящий id
-            line.append(InlineKeyboardButton(f"🗑 {n}", callback_data=f"rmd:del:{r['id']}"))
+        for n, r in enumerate(rows, 1):
+            line.append(b(f"🗑 {n}", callback_data=f"rl:ask:{r['id']}"))
             if len(line) == 5:
                 kb.append(line); line = []
         if line:
             kb.append(line)
-        await reply("<b>Напоминания и задания</b>\n" +
-                    "\n".join(render.esc(self.planner.describe(r, num=n)) for n, r in enumerate(rows, 1)),
-                    InlineKeyboardMarkup(kb))
+        kb.append([b("➕ Новое напоминание", callback_data="rl:new")])
+        text = ("<b>Напоминания и задания</b>\n" +
+                "\n".join(render.esc(self.planner.describe(r, num=n)) for n, r in enumerate(rows, 1)) +
+                "\n\n<i>🗑 N — удалить пункт N (спрошу подтверждение).</i>")
+        return text, InlineKeyboardMarkup(kb)
+
+    async def cmd_reminders(self, reply):
+        text, kb = self.render_reminders()
+        await reply(text, kb)
+
+    async def on_list_button(self, cq, rest):
+        action, _, arg = rest.partition(":")
+        m = cq.message
+        b = InlineKeyboardButton
+        if action == "new":
+            await cq.answer()
+            thread = m.message_thread_id if m.is_topic_message else None
+            if m.chat.id == self.cfg.home_chat_id:
+                place = Place("home", m.chat.id, thread, None, self.store.topic_at(m.chat.id, thread))
+            elif m.chat.type == ChatType.PRIVATE:
+                place = Place("private", m.chat.id, None, None, None)
+            else:
+                place = Place("foreign", m.chat.id, thread, None, None)
+            return await self.wizard.start(place, "remind")
+        if action == "ask":
+            r = self.store.rem(int(arg))
+            if not r or r["state"] != "active":
+                await cq.answer("Уже удалено.")
+            else:
+                await cq.answer()
+                kb = InlineKeyboardMarkup([[b("Да, удалить", callback_data=f"rl:yes:{r['id']}"),
+                                            b("Нет", callback_data="rl:list")]])
+                return await self.out.edit(f"Удалить напоминание?\n«{render.esc(r['text'])}»",
+                                           chat_id=m.chat.id, message_id=m.message_id, markup=kb)
+        if action == "yes":
+            self.store.rem_update(int(arg), state="cancelled")
+            await cq.answer("Удалено")
+        else:
+            await cq.answer()
+        text, kb = self.render_reminders()
+        await self.out.edit(text, chat_id=m.chat.id, message_id=m.message_id, markup=kb)
 
     async def cmd_usage(self, reply):
         u = await self.daemon.usage()
@@ -1088,6 +1153,12 @@ class ClaudeTG:
         try:
             if kind == "noop":
                 return await cq.answer()
+            if kind == "rw":                  # мастер нового напоминания: rw:<wid>:<шаг>[:<значение>]
+                wid, _, tail = rest.partition(":")
+                action, _, arg = tail.partition(":")
+                return await self.wizard.on_button(cq, wid, action, arg)
+            if kind == "rl":                  # список /reminders
+                return await self.on_list_button(cq, rest)
             if kind == "rmd":                 # rmd:<действие>:<id>[:доп. параметры выбора времени]
                 parts = rest.split(":")
                 return await self.planner.on_button(cq, parts[0], int(parts[1]), parts[2:])
