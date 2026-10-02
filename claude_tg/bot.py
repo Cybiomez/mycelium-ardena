@@ -143,6 +143,10 @@ class ClaudeTG:
     async def _post_init(self, app):
         me = await app.bot.get_me()
         self.username = me.username
+        prev = self.store.kv_get("bot_id")
+        self.store.kv_set("bot_id", me.id)
+        if prev and prev != me.id:         # сменили токен на другого бота (Altsy → Ardena)
+            asyncio.create_task(self._migrate_bot(prev))
         await self.daemon.start()
         try:
             await self.daemon.health()
@@ -177,6 +181,32 @@ class ClaudeTG:
                                                scope=BotCommandScopeChat(self.cfg.owner_id))
         except Exception as e:
             log.warning("меню команд: %s", e)
+
+    async def _migrate_bot(self, prev_id):
+        """Бот сменился. Сообщения прежнего бота новый править не может, поэтому шапки тем
+        перевыпускаем: снимаем все закрепы в теме и ставим свою шапку. Идёт в фоне, с паузами
+        (лимиты Telegram на группу). Кнопки под старыми сообщениями прежнего бота не работают."""
+        await asyncio.sleep(5)
+        topics = self.store.dialog_topics(self.cfg.home_chat_id)
+        log.info("смена бота (%s → @%s): перевыпускаю шапки %d тем", prev_id, self.username, len(topics))
+        for t in topics:
+            try:
+                await self.out.call(self.app.bot.unpin_all_forum_topic_messages, chat_id=t["chat_id"],
+                                    message_thread_id=t["thread_id"])
+            except Exception as e:
+                log.warning("снять закрепы в «%s»: %s", t["title"], e)
+            self.store.update_topic(t["id"], header_msg_id=None)
+            try:
+                await self.ensure_header(self.store.topic(t["id"]))
+            except Exception as e:
+                log.warning("шапка «%s»: %s", t["title"], e)
+            await asyncio.sleep(3)
+        self.store.kv_set("panel_msg", None)
+        await self.out.send(self.cfg.home_chat_id,
+                            f"🔁 Бот сменился — теперь я @{self.username}. Шапки тем перевыпущены. "
+                            "Кнопки под старыми сообщениями прежнего бота больше не работают: "
+                            "напоминания и списки открывайте заново (/reminders). "
+                            f"Инлайн теперь через @{self.username}.", html_mode=False, silent=True)
 
     async def _recover_live(self):
         """Живые сообщения ходов держатся в памяти; рестарт их теряет и «Думаю…» висит вечно.
