@@ -606,8 +606,15 @@ class ClaudeTG:
         t, sess, job = ev.get("type"), ev.get("session"), ev.get("jobId")
         if t == "models.changed":
             self.models_cache = []
+            # Объявляем только действительно впервые увиденные модели (демон при
+            # перезапуске может прислать уже известные из-за плавающих id)
+            seen = set(self.store.kv_get("announced_models", []))
+            fresh = [m for m in (ev.get("added") or []) if m not in seen]
+            if not fresh:
+                return
+            self.store.kv_set("announced_models", sorted(seen | set(fresh)))
             return await self.out.send(self.cfg.home_chat_id, "🆕 Появилась модель: " +
-                                       ", ".join(ev.get("added") or []) + ". Уже есть в /settings.",
+                                       ", ".join(fresh) + ". Уже есть в /settings.",
                                        html_mode=False, silent=True)
         if t == "session.created":
             temp = ev.get("tempKey")
