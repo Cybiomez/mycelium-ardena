@@ -2,7 +2,7 @@
 
   python -m claude_tg                          — бот
   claude-tg unlock                             — снять /panic (только с бокса)
-  claude-tg remind "завтра 9:00 текст" [--topic "Название темы"]
+  claude-tg remind "завтра 9:00 текст" [--topic "Название темы"] [--note путь.md]
                                                — напоминание из скрипта/cron (без темы — в TGChat)
   claude-tg reminders                          — активные напоминания и задания
 """
@@ -15,11 +15,15 @@ from . import config
 def _cli_remind(cfg, argv):
     from . import schedule
     from .db import Store
-    topic_name = None
-    if "--topic" in argv:
-        i = argv.index("--topic")
-        topic_name = argv[i + 1] if i + 1 < len(argv) else None
+    def take(flag):
+        nonlocal argv
+        if flag not in argv:
+            return None
+        i = argv.index(flag)
+        val = argv[i + 1] if i + 1 < len(argv) else None
         argv = argv[:i] + argv[i + 2:]
+        return val
+    topic_name, note = take("--topic"), take("--note")
     phrase = " ".join(argv).strip()
     if not phrase:
         print('Формат: claude-tg remind "завтра 9:00 текст" [--topic "Название темы"]')
@@ -37,7 +41,7 @@ def _cli_remind(cfg, argv):
             print(f"Нет темы «{topic_name}»")
             return 2
         topic_id = rows[0]["id"]
-    r = st.rem_add("remind", text, due, repeat=repeat, topic_id=topic_id, source="cli")
+    r = st.rem_add("remind", text, due, repeat=repeat, topic_id=topic_id, note=note, source="cli")
     print(f"#{r['id']} → {schedule.fmt(due, cfg.tz)} МСК {schedule.describe_repeat(repeat)}: {text}")
     return 0
 
