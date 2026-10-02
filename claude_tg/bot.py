@@ -26,6 +26,8 @@ from telegram.ext import (Application, CallbackQueryHandler, ChatMemberHandler, 
 from . import render
 from .daemon import Daemon, DaemonError
 from .db import Store
+from .mcp import McpServer
+from .planner import Planner
 from .sync import Sync
 from .tgio import Out
 from .turn import Turn
@@ -45,6 +47,8 @@ HELP_HOME = (
     "/rename Название — переименовать тему и сессию\n"
     "/mirror on|off — дублировать в тему ходы из VS Code/чужих чатов\n"
     "/queue — очередь · /usage — лимиты подписки\n"
+    "/remind когда текст — напоминание (в теме — сюда, иначе в TGChat)\n"
+    "/task когда что сделать — задание мне по расписанию · /reminders — список\n"
     "В General: /new Название · /attach · /topics · /defaults · /setup\n"
     "/panic — аварийный стоп (снять — только с бокса)"
 )
@@ -64,10 +68,12 @@ MENU = [
     ("settings", "Модель и effort сессии"), ("stop", "Прервать ход"), ("context", "Контекст и сжатие"),
     ("queue", "Очередь"), ("usage", "Лимиты подписки"), ("rename", "Переименовать тему"), ("mirror", "Дублировать сюда ходы вне бота"),
     ("new", "Новая тема (в General)"), ("attach", "Подключить сессию (в General)"),
-    ("topics", "Список тем"), ("defaults", "Настройки новых тем"), ("help", "Справка"),
+    ("remind", "Напомнить: /remind завтра 9:00 текст"), ("task", "Задание себе по расписанию"),
+    ("reminders", "Напоминания и задания"), ("topics", "Список тем"), ("defaults", "Настройки новых тем"), ("help", "Справка"),
 ]
 MENU_PRIVATE = [("settings", "Модель и effort TGChat"), ("stop", "Прервать ход"), ("context", "Контекст"),
-                ("queue", "Очередь"), ("usage", "Лимиты подписки"), ("buffer", "Буфер контекста"), ("help", "Справка")]
+                ("queue", "Очередь"), ("usage", "Лимиты подписки"), ("remind", "Напомнить"), ("reminders", "Напоминания"),
+                ("buffer", "Буфер контекста"), ("help", "Справка")]
 
 
 def third_party(text: str, source: str) -> str:
@@ -114,6 +120,9 @@ class ClaudeTG:
         self._listen_task = None
         self.sync = Sync(self)
         self._sync_task = None
+        self.planner = Planner(self)
+        self._planner_task = None
+        self.mcp = McpServer(self, int(os.environ.get("CLAUDE_TG_MCP_PORT", "8790")))
         # Отправка хода и разбор событий — под одной блокировкой: иначе события нового хода
         # могут прийти раньше, чем бот узнает его номер, и начало ответа потеряется
         self.flow = asyncio.Lock()
@@ -146,6 +155,11 @@ class ClaudeTG:
         await self._sweep_duplicate_topics()
         self._listen_task = asyncio.create_task(self.daemon.listen(self.on_event, on_connect=self.reconcile))
         self._sync_task = asyncio.create_task(self.sync.loop())
+        self._planner_task = asyncio.create_task(self.planner.loop())
+        try:
+            await self.mcp.start()
+        except OSError as e:
+            log.error("MCP-сервер не поднялся (порт занят?): %s — напоминания из сессий работать не будут", e)
         log.info("бот @%s запущен, владелец %s, домашняя группа %s", self.username, self.cfg.owner_id,
                  self.cfg.home_chat_id)
 
@@ -184,9 +198,10 @@ class ClaudeTG:
                 log.info("удалён дубль темы «%s» (thread %s)", title, r["thread_id"])
 
     async def _post_shutdown(self, app):
-        for task in (self._listen_task, self._sync_task):
+        for task in (self._listen_task, self._sync_task, self._planner_task):
             if task:
                 task.cancel()
+        await self.mcp.stop()
         await self.daemon.close()
 
     def run(self):
@@ -469,7 +484,7 @@ class ClaudeTG:
         return "[Контекст — пересланные сообщения]:\n" + "\n\n".join(texts) + "\n\n[Вопрос]:\n"
 
     async def submit(self, place: Place, text, atts=None, *, question=None, inline_id=None, inline_type=None,
-                     force=False):
+                     force=False, priority=1):
         topic = place.topic
         session = topic["session_id"] if topic else None
         # Сессия открыта в VS Code/CLI → два процесса в одном транскрипте (ТЗ §4.5)
@@ -498,7 +513,7 @@ class ClaudeTG:
         async with self.flow:
             try:
                 res = await self.daemon.submit(text, session_id=session, attachments=atts, settings=pending,
-                                               channel=channel)
+                                               channel=channel, priority=priority)
             except DaemonError as e:
                 res, err = None, e
             else:
@@ -776,6 +791,10 @@ class ClaudeTG:
             return await self.cmd_panic(reply)
         if cmd == "buffer":
             return await self.cmd_buffer(reply)
+        if cmd in ("remind", "task"):
+            return await self.cmd_remind(reply, place, args, kind="task" if cmd == "task" else "remind")
+        if cmd == "reminders":
+            return await self.cmd_reminders(reply)
         # дальше — команды сессии: нужна тема (в чужих чатах и личке — TGChat)
         if not topic or topic["kind"] not in ("dialog", "tgchat"):
             return await reply("Эта команда работает в теме-диалоге (или в TGChat).", html_mode=False)
@@ -904,6 +923,38 @@ class ClaudeTG:
         await reply(f"{'🔁 Включил' if on else '⏸ Выключил'} дублирование ходов из {where} в эту тему."
                     + (" Показываю только новые." if on else ""), html_mode=False)
 
+    async def cmd_remind(self, reply, place, args, kind="remind"):
+        """/remind <когда> <текст> — в теме-диалоге уходит в эту тему, иначе в TGChat.
+        /task <когда> <что сделать> — задание себе: в срок промпт уйдёт в сессию темы."""
+        from . import schedule
+        if not args.strip():
+            ex = "/remind завтра 9:00 Заготовить курицу" if kind == "remind" else "/task по будням 9:00 проверь бэкап и доложи"
+            return await reply("Формат: <code>" + render.esc(ex) + "</code>\nВремя: «через 2 часа», «в пятницу 10:00», "
+                               "«03.10 18:30», «каждый день 9:00», «по будням 9:00», «по пн,чт 18:00».")
+        try:
+            due, repeat, text = schedule.parse(args, self.cfg.tz)
+        except schedule.ParseError as e:
+            return await reply(f"⚠ {e}", html_mode=False)
+        if not text:
+            return await reply("После времени нужен текст: что напомнить.", html_mode=False)
+        topic = place.topic if place.kind == "home" and place.topic and place.topic["kind"] == "dialog" else None
+        if kind == "task" and not topic:
+            topic = self.store.topic_by_kind(self.cfg.home_chat_id, "tgchat")
+            if not topic:
+                return await reply("Тема TGChat не настроена: /setup в домашней группе.", html_mode=False)
+        r = self.planner.create(kind, text, due, repeat=repeat, topic_id=topic["id"] if topic and topic["kind"] == "dialog" else None,
+                                source="user")
+        await reply(("🔔 Напомню" if kind == "remind" else "🤖 Задание запланировано:") +
+                    f" {render.esc(self.planner.describe(r))}")
+
+    async def cmd_reminders(self, reply):
+        rows = self.store.rem_active()
+        if not rows:
+            return await reply("Активных напоминаний и заданий нет.", html_mode=False)
+        kb = [[InlineKeyboardButton(f"🗑 #{r['id']}", callback_data=f"rmd:del:{r['id']}")] for r in rows[:15]]
+        await reply("<b>Напоминания и задания</b>\n" + "\n".join(render.esc(self.planner.describe(r)) for r in rows[:15]),
+                    InlineKeyboardMarkup(kb))
+
     async def cmd_usage(self, reply):
         u = await self.daemon.usage()
         if not u:
@@ -1029,6 +1080,9 @@ class ClaudeTG:
         try:
             if kind == "noop":
                 return await cq.answer()
+            if kind == "rmd":
+                action, _, rid = rest.partition(":")
+                return await self.planner.on_button(cq, action, int(rid))
             if kind == "stop":
                 turn = self.turns.get(int(rest))
                 if turn:

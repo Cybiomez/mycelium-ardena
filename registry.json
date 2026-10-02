@@ -2,9 +2,9 @@
   "id": "mycelium-claude-tg",
   "name": "ClaudeTG",
   "mark": "#D97757",
-  "description": "Telegram-бот для работы с Claude: темы супергруппы = сессии ClaudeDaemon, TGChat, инлайн-режим.",
+  "description": "Telegram-бот для работы с Claude: темы = сессии ClaudeDaemon, TGChat, инлайн, напоминания и задания по расписанию.",
   "location": "Бокс",
   "mechanism": "systemd (постоянно)",
-  "schedule": "постоянно",
-  "check": { "type": "systemd", "scope": "system", "unit": "mycelium-claude-tg.service" }
+  "schedule": "пульс планировщика раз в 30 с",
+  "check": { "type": "file_mtime", "path": "~/.local/share/claude-tg/heartbeat", "warn_hours": 0.05, "crit_hours": 0.25 }
 }

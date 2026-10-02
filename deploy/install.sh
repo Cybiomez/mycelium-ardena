@@ -96,7 +96,22 @@ sudo systemctl daemon-reload
 sudo systemctl enable mycelium-claude-tg >/dev/null
 sudo systemctl restart mycelium-claude-tg
 
-# 5. Манифест для MyCelium Console
+# 5. MCP-сервер бота → в Claude Code (уровень пользователя: виден и VS Code, и сессиям демона).
+#    Заголовок X-Claude-Session Claude Code заполняет id своей сессии — по нему бот шлёт
+#    напоминание в тему именно этой сессии. Токен бот создаёт сам при первом запуске.
+TOKEN_FILE="${CLAUDE_TG_DATA_DIR:-$HOME/.local/share/claude-tg}/mcp-token"
+for _ in $(seq 1 20); do [ -s "$TOKEN_FILE" ] && break; sleep 1; done
+if [ -s "$TOKEN_FILE" ] && command -v claude >/dev/null; then
+  claude mcp remove claude-tg -s user >/dev/null 2>&1 || true
+  claude mcp add --transport http --scope user claude-tg "http://127.0.0.1:${CLAUDE_TG_MCP_PORT:-8790}/mcp" \
+    --header "Authorization: Bearer $(cat "$TOKEN_FILE")" \
+    --header 'X-Claude-Session: ${CLAUDE_CODE_SESSION_ID}' >/dev/null
+  say "MCP-сервер claude-tg зарегистрирован в Claude Code (новые сессии увидят инструменты)"
+else
+  say "MCP не зарегистрирован: нет токена ($TOKEN_FILE) или команды claude"
+fi
+
+# 6. Манифест для MyCelium Console
 mkdir -p "$HOME/.config/eco/registry"
 cp "$SRC/registry.json" "$HOME/.config/eco/registry/09-mycelium-claude-tg.json"
 

@@ -40,6 +40,23 @@ class Store:
                 text TEXT,                         -- текст пересланного (с пометкой источника)
                 attachment TEXT                    -- JSON вложения демона (картинка/файл) или NULL
             );
+            CREATE TABLE IF NOT EXISTS reminders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL,                -- remind (просто текст, без модели) | task (промпт в сессию)
+                text TEXT NOT NULL,                -- текст напоминания или промпт задания
+                note TEXT,                         -- путь к заметке Obsidian (кнопка «Показать»)
+                topic_id INTEGER,                  -- куда: тема; NULL — TGChat
+                settings TEXT,                     -- JSON {model, effort} для задания
+                due_at INTEGER NOT NULL,           -- UTC, секунды
+                repeat TEXT,                       -- JSON повтора (schedule.parse_repeat) или NULL
+                state TEXT NOT NULL DEFAULT 'active', -- active | done | cancelled
+                sent_at INTEGER,                   -- когда последний раз отправлено (ждём «Сделано»)
+                nags INTEGER NOT NULL DEFAULT 0,   -- сколько раз повторно напомнили без ответа
+                msg_chat INTEGER, msg_id INTEGER,  -- последнее сообщение напоминания (для правки кнопками)
+                source TEXT,                       -- mcp | user | cli
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_rem_due ON reminders(state, due_at);
             CREATE TABLE IF NOT EXISTS live (
                 job_id INTEGER PRIMARY KEY,        -- живое сообщение хода: чтобы после рестарта
                 chat_id INTEGER NOT NULL,          -- не осталось висеть «Думаю…»
@@ -107,6 +124,41 @@ class Store:
 
     def delete_topic(self, topic_id):
         self.db.execute("DELETE FROM topics WHERE id = ?", (topic_id,))
+
+    # ---------- напоминания и задания (фаза 2, ТЗ §8) ----------
+    def rem_add(self, kind, text, due_at, *, repeat=None, topic_id=None, note=None, settings=None, source="user"):
+        cur = self.db.execute(
+            "INSERT INTO reminders (kind, text, note, topic_id, settings, due_at, repeat, source, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (kind, text, note, topic_id, json.dumps(settings) if settings else None, int(due_at),
+             json.dumps(repeat) if repeat else None, source, int(time.time())))
+        return self.rem(cur.lastrowid)
+
+    def rem(self, rid):
+        return self.db.execute("SELECT * FROM reminders WHERE id = ?", (rid,)).fetchone()
+
+    def rem_update(self, rid, **fields):
+        for k in ("repeat", "settings"):
+            if k in fields and fields[k] is not None and not isinstance(fields[k], str):
+                fields[k] = json.dumps(fields[k])
+        cols = ", ".join(f"{k} = ?" for k in fields)
+        self.db.execute(f"UPDATE reminders SET {cols} WHERE id = ?", (*fields.values(), rid))
+        return self.rem(rid)
+
+    def rem_due(self, now):
+        """Пора отправить: срок наступил, а с последней отправки ещё не отправляли."""
+        return self.db.execute(
+            "SELECT * FROM reminders WHERE state = 'active' AND due_at <= ? AND (sent_at IS NULL OR sent_at < due_at) "
+            "ORDER BY due_at", (int(now),)).fetchall()
+
+    def rem_unanswered(self, older_than):
+        """Напоминания, отправленные давно и без ответа (повтор «пинка»)."""
+        return self.db.execute(
+            "SELECT * FROM reminders WHERE state = 'active' AND kind = 'remind' AND sent_at IS NOT NULL "
+            "AND sent_at >= due_at AND sent_at < ?", (int(older_than),)).fetchall()
+
+    def rem_active(self):
+        return self.db.execute("SELECT * FROM reminders WHERE state = 'active' ORDER BY due_at").fetchall()
 
     # ---------- живые сообщения (переживание рестарта) ----------
     def live_add(self, job_id, chat_id, message_id):
