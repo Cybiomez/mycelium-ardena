@@ -1088,9 +1088,9 @@ class ClaudeTG:
         try:
             if kind == "noop":
                 return await cq.answer()
-            if kind == "rmd":
-                action, _, rid = rest.partition(":")
-                return await self.planner.on_button(cq, action, int(rid))
+            if kind == "rmd":                 # rmd:<действие>:<id>[:доп. параметры выбора времени]
+                parts = rest.split(":")
+                return await self.planner.on_button(cq, parts[0], int(parts[1]), parts[2:])
             if kind == "stop":
                 turn = self.turns.get(int(rest))
                 if turn:
