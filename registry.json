@@ -1,0 +1,10 @@
+{
+  "id": "mycelium-claude-tg",
+  "name": "ClaudeTG",
+  "mark": "#D97757",
+  "description": "Telegram-бот для работы с Claude: темы = сессии ClaudeDaemon, TGChat, инлайн, напоминания и задания по расписанию.",
+  "location": "Бокс",
+  "mechanism": "systemd (постоянно)",
+  "schedule": "пульс планировщика раз в 30 с",
+  "check": { "type": "file_mtime", "path": "~/.local/share/claude-tg/heartbeat", "warn_hours": 0.05, "crit_hours": 0.25 }
+}
