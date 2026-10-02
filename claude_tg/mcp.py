@@ -5,9 +5,9 @@ MCP (Model Context Protocol) — открытый стандарт подклю�
 (поток SSE нам не нужен: инструменты отвечают сразу). Официальный SDK `mcp` не берём —
 он сам по себе 62 МБ памяти, а нужны три метода: initialize, tools/list, tools/call.
 
-Чья сессия зовёт: Claude Code подставляет в заголовок X-Claude-Session своё
-${CLAUDE_CODE_SESSION_ID} (настройка при установке). Нет заголовка — берём сессию,
-которая сейчас выполняется в демоне; нет и её — цель TGChat.
+Чья сессия зовёт — по сетевому соединению (claude_tg/caller.py): порт клиента → процесс
+Claude → его --resume <id>; потомок демона → выполняющийся ход демона; иначе свежий
+транскрипт. Не определили — цель TGChat.
 
 Слушает только 127.0.0.1, вход — по токену (файл 600 в каталоге данных бота).
 """
@@ -17,7 +17,9 @@ import secrets
 
 from aiohttp import web
 
-from . import render, schedule
+from pathlib import Path
+
+from . import caller as callers, render, schedule
 
 log = logging.getLogger(__name__)
 
@@ -126,7 +128,10 @@ class McpServer:
             body = await req.json()
         except ValueError:
             return web.json_response(_err(None, -32700, "parse error"), status=400)
-        caller = await self._caller(req.headers.get("X-Claude-Session", ""))
+        peer = req.transport.get_extra_info("peername") if req.transport else None
+        caller, how = await callers.find_session(peer[1] if peer else None, self.port, self.b.daemon,
+                                                 self.b.sync.cwd or str(Path.home()))
+        self._how = how
         msgs = body if isinstance(body, list) else [body]
         out = [r for r in [await self._one(m, caller) for m in msgs] if r is not None]
         if not out:
@@ -148,24 +153,13 @@ class McpServer:
             if method == "tools/list":
                 return _ok(mid, {"tools": TOOLS})
             if method == "tools/call":
-                log.info("MCP %s от сессии %s", params.get("name"), (caller or "—")[:8])
+                log.info("MCP %s от сессии %s (%s)", params.get("name"), (caller or "—")[:8], getattr(self, "_how", ""))
                 text, is_err = await self.call(params.get("name"), params.get("arguments") or {}, caller)
                 return _ok(mid, {"content": [{"type": "text", "text": text}], "isError": is_err})
             return _err(mid, -32601, f"нет метода {method}")
         except Exception as e:
             log.exception("MCP %s", method)
             return _err(mid, -32603, str(e))
-
-    async def _caller(self, header: str):
-        """Id вызывающей сессии: заголовок → выполняющийся ход демона → None."""
-        h = header.strip()
-        if h and not h.startswith("${"):
-            return h
-        try:
-            running = (await self.b.daemon.queue()).get("running") or []
-            return running[0]["session"] if running else None
-        except Exception:
-            return None
 
     def _topic_for(self, target: str | None, caller):
         """(topic_id|None, подпись). None — TGChat."""
