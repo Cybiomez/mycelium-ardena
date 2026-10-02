@@ -105,6 +105,7 @@ class McpServer:
         return self.token_file.read_text().strip()
 
     async def start(self):
+        self.token()        # токен — сразу при старте: его ждёт установщик для регистрации в Claude Code
         app = web.Application(client_max_size=1024 * 1024)
         app.router.add_post("/mcp", self.handle)
         app.router.add_get("/mcp", lambda r: web.Response(status=405, headers={"Allow": "POST"}))
