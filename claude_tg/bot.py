@@ -29,11 +29,17 @@ from .db import Store
 from .mcp import McpServer
 from .planner import Planner
 from .sync import Sync
+from . import files
+from .decisions import Decisions
 from .tgio import Out
 from .wizard import Wizard
 from .turn import Turn
 
 log = logging.getLogger(__name__)
+
+# Режимы прав: значение в демоне → подпись. «С подтверждением» и «План» — с кнопками решений
+MODES = [("bypassPermissions", "Авто"), ("default", "С подтверждением"), ("plan", "План")]
+MODE_NAME = dict(MODES)
 
 # Реакции — только из списка, разрешённого Telegram (⏳ и 📎 в нём нет)
 REACT_QUEUED = "👀"
@@ -45,7 +51,7 @@ HELP_HOME = (
     "В теме: текст → в сессию темы.\n"
     "/settings — модель и effort сессии\n"
     "/stop — прервать ход · /context — контекст и сжатие\n"
-    "/rename Название — переименовать тему и сессию\n"
+    "/rename Название — переименовать тему и сессию · /fork — развилка темы\n"
     "/mirror on|off — дублировать в тему ходы из VS Code/чужих чатов\n"
     "/queue — очередь · /usage — лимиты подписки\n"
     "/remind — новое напоминание: выбор даты и времени кнопками (или быстро: /remind завтра 9:00 текст)\n"
@@ -68,7 +74,7 @@ HELP_PRIVATE = (
 MENU = [   # описания короткие: в группе Telegram показывает «/cmd@бот», и длинное описание обрезается
     ("remind", "Напоминание"), ("reminders", "Напоминания"), ("task", "Задание мне"),
     ("settings", "Модель, effort"), ("stop", "Прервать ход"), ("context", "Контекст"),
-    ("queue", "Очередь"), ("usage", "Лимиты"), ("rename", "Переименовать"), ("mirror", "Дублирование"),
+    ("queue", "Очередь"), ("usage", "Лимиты"), ("rename", "Переименовать"), ("fork", "Развилка темы"), ("mirror", "Дублирование"),
     ("new", "Новая тема"), ("attach", "Сессию в тему"), ("topics", "Темы"), ("defaults", "Настройки тем"),
     ("help", "Справка"),
 ]
@@ -123,6 +129,7 @@ class ClaudeTG:
         self._sync_task = None
         self.planner = Planner(self)
         self.wizard = Wizard(self)
+        self.decisions = Decisions(self)
         self._planner_task = None
         self.mcp = McpServer(self, int(os.environ.get("CLAUDE_TG_MCP_PORT", "8790")))
         # Отправка хода и разбор событий — под одной блокировкой: иначе события нового хода
@@ -301,6 +308,9 @@ class ClaudeTG:
                 await self.out.send(chat.id, "🔒 Бот заблокирован командой /panic. Снять — на боксе: "
                                     "<code>claude-tg unlock</code>", thread_id=self._thread(msg))
             return
+        rid = self.decisions.wants_fix(msg)
+        if rid and not text.strip().startswith("/"):
+            return await self.decisions.take_fix(msg, rid, self._untag(text) if self._tagged(text) else text)
         wid = self.wizard.wants_text(msg)
         if wid and not (text.strip().startswith("/") or (self._tagged(text) and self._untag(text).startswith("/"))):
             return await self.wizard.take_text(msg, wid, self._untag(text) if self._tagged(text) else text)
@@ -600,6 +610,8 @@ class ClaudeTG:
                     on_created=lambda t: self.store.live_add(t.job_id, t.chat_id, t.msg_id, t.inline_id),
                     on_done=lambda t: self.store.live_del(t.job_id))
         turn.place, turn.question, turn.inline_type = place, question, inline_type
+        if not inline_id and place.kind in ("home", "private"):   # в чужих чатах — посторонние
+            turn.extra_rows = lambda ans: files.rows(self.store, ans, InlineKeyboardButton)
         turn.topic_id = topic["id"] if topic else None
         self.turns[job] = turn
         if inline_id:
@@ -713,6 +725,8 @@ class ClaudeTG:
             return
         if t == "question":
             await self.on_question(sess, ev.get("questions") or [], turn)
+        if t in ("permission", "plan"):
+            await self.decisions.on_event(t, sess, ev, turn)
         if t == "context":
             for tp in self.store.topics_for_session(sess):
                 pct = (ev.get("context") or {}).get("percentage")
@@ -771,7 +785,8 @@ class ClaudeTG:
         title = "TGChat" if topic["kind"] == "tgchat" else (topic["title"] or "Тема")
         lines = [f"🧵 <b>{render.esc(title)}</b>",
                  f"Модель: {render.esc(await self._model_name(s.get('model')))} · effort: "
-                 f"{render.esc(s.get('effort') or 'по умолчанию')} · режим: Авто"]
+                 f"{render.esc(s.get('effort') or 'по умолчанию')} · режим: "
+                 f"{render.esc(MODE_NAME.get(s.get('permissionMode') or 'bypassPermissions', 'Авто'))}"]
         tail = []
         if pct is not None:
             tail.append(f"контекст {pct}%")
@@ -863,6 +878,8 @@ class ClaudeTG:
             return await reply(*await self.settings_view(topic))
         if cmd == "rename":
             return await self.cmd_rename(reply, place, topic, args)
+        if cmd == "fork":
+            return await self.cmd_fork(reply, place, topic, args)
         if cmd == "mirror":
             return await self.cmd_mirror(reply, topic, args)
         if not session or session.startswith("new-"):
@@ -1084,6 +1101,35 @@ class ClaudeTG:
             await cq.answer()
         await edit(*self.render_reminders(origin))
 
+    async def cmd_fork(self, reply, place, topic, name):
+        """/fork [название] — развилка: новая тема с копией сессии, основная ветка не меняется."""
+        if place.kind != "home" or topic["kind"] != "dialog":
+            return await reply("Развилка делается в теме-диалоге домашней группы.", html_mode=False)
+        sess = topic["session_id"]
+        if not sess or sess.startswith("new-"):
+            return await reply("У темы ещё нет сессии — развилку можно сделать после первого ответа.", html_mode=False)
+        title = ((name or "").strip() or f"{topic['title']} · развилка")[:128]
+        new_sid = await self.daemon.fork(sess, title)
+        ft = await self.out.call(self.app.bot.create_forum_topic, chat_id=self.cfg.home_chat_id, name=title)
+        self.bot_created.add(ft.message_thread_id)
+        t = self.store.add_topic(self.cfg.home_chat_id, ft.message_thread_id, "dialog", title, session_id=new_sid)
+        await self.ensure_header(t)
+        await self.out.send(self.cfg.home_chat_id, f"🍴 Развилка от «{render.esc(topic['title'])}». "
+                            "Здесь можно пробовать другой путь — исходная тема не меняется.",
+                            thread_id=ft.message_thread_id, silent=True)
+        await reply(f"🍴 Развилка создана: «{render.esc(title)}» — {self._topic_link(t)}")
+
+    async def send_file(self, cq, key):
+        p, why = files.path_for(self.store, key)
+        if not p:
+            return await cq.answer(why, show_alert=True)
+        await cq.answer("Отправляю…")
+        m = cq.message
+        with open(p, "rb") as fh:            # потоком: у бота потолок памяти 150 МБ
+            await self.out.send_document(m.chat.id, fh, p.name,
+                                         thread_id=m.message_thread_id if m.is_topic_message else None,
+                                         caption=str(p).replace(str(files.HOME), "~"))
+
     async def cmd_usage(self, reply):
         u = await self.daemon.usage()
         if not u:
@@ -1163,13 +1209,18 @@ class ClaudeTG:
             rows.append([InlineKeyboardButton(("● " if eff is None else "") + "авто", callback_data=f"set:{tid}:e:-")] +
                         [InlineKeyboardButton(("● " if eff == lv else "") + lv, callback_data=f"set:{tid}:e:{lv}")
                          for lv in levels])
+        mode = cur.get("permissionMode") or "bypassPermissions"
+        rows.append([InlineKeyboardButton(("● " if mode == v else "") + name, callback_data=f"set:{tid}:p:{v}")
+                     for v, name in MODES])
         title = "по умолчанию для новых тем" if not topic else \
             ("TGChat" if topic["kind"] == "tgchat" else topic["title"] or "тема")
         text = (f"⚙ <b>Настройки — {render.esc(title)}</b>\n"
                 f"Модель: {render.esc(await self._model_name(model))}\n"
                 f"Effort: {render.esc(cur.get('effort') or 'авто')}"
                 + ("" if levels else " (эта модель effort не поддерживает)") +
-                "\nРежим прав: Авто\n<i>Действует со следующего хода.</i>")
+                f"\nРежим прав: {render.esc(MODE_NAME.get(mode, 'Авто'))}"
+                "\n<i>Авто — без вопросов; С подтверждением — спрошу перед правками и командами; "
+                "План — сначала план на утверждение. Действует со следующего хода.</i>")
         return text, InlineKeyboardMarkup(rows)
 
     async def apply_setting(self, tid, what, value):
@@ -1182,11 +1233,13 @@ class ClaudeTG:
             levels = (info or {}).get("supportedEffortLevels") or []
             if cur.get("effort") and cur["effort"] not in levels:
                 change["effort"] = None   # новая модель этот effort не умеет — сброс (ТЗ §6 п. 5)
+        elif what == "p":
+            change["permissionMode"] = value if value in MODE_NAME else "bypassPermissions"
         else:
             change["effort"] = None if value == "-" else value
         if not topic:
             cur.update(change)
-            self.store.kv_set("defaults", {k: v for k, v in cur.items() if k in ("model", "effort")})
+            self.store.kv_set("defaults", {k: v for k, v in cur.items() if k in ("model", "effort", "permissionMode")})
             return None
         if topic["session_id"]:
             await self.daemon.set_settings(topic["session_id"], **{k: (v if v is not None else "") for k, v in change.items()})
@@ -1209,6 +1262,13 @@ class ClaudeTG:
         try:
             if kind == "noop":
                 return await cq.answer()
+            if kind in ("pm", "pl"):          # решения: pm:<requestId>:a|al|d · pl:<requestId>:ok|fix|nofb
+                rid, _, action = rest.rpartition(":")
+                if kind == "pl" and action == "nofb":
+                    return await self.decisions.no_feedback(cq, rid)
+                return await self.decisions.on_button(cq, kind, rid, action)
+            if kind == "fs":                  # «📎 файл» под ответом
+                return await self.send_file(cq, rest)
             if kind == "rw":                  # мастер нового напоминания: rw:<wid>:<шаг>[:<значение>]
                 wid, _, tail = rest.partition(":")
                 action, _, arg = tail.partition(":")

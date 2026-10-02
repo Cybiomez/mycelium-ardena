@@ -76,6 +76,7 @@ class Turn:
         self.on_final = on_final            # async fn(turn, answer_md) — копия в TGChat, шапка
         self.on_created = on_created         # fn(turn) — запомнить живое сообщение (переживание рестарта)
         self.on_done = on_done              # fn(turn) — забыть живое сообщение
+        self.extra_rows = None              # fn(answer_md) -> ряды кнопок под итогом (файлы)
         self.msg_id = None
         self.status = "⏳ Жду очереди"
         self.started = None
@@ -195,6 +196,10 @@ class Turn:
                     self.actions.append("   ⚠ инструмент вернул ошибку")
         elif t == "question":
             self.status = "❓ Жду ответа на вопрос"
+        elif t == "permission":
+            self.status = "🔐 Жду разрешения"
+        elif t == "plan":
+            self.status = "📋 Жду утверждения плана"
         elif t == "context":
             self.context_pct = (ev.get("context") or {}).get("percentage")
         elif t == "job.done":
@@ -297,9 +302,15 @@ class Turn:
     async def _final_chat(self, answer):
         chunks = [render.to_html(c) for c in render.split_markdown(answer)] or [render.esc(answer)]
         extras = self._extras()
-        markup = None
+        rows = []
         if self.thinking_truncated():
-            markup = InlineKeyboardMarkup([[InlineKeyboardButton("💭 Полностью", callback_data=f"think:{self.job_id}")]])
+            rows.append([InlineKeyboardButton("💭 Полностью", callback_data=f"think:{self.job_id}")])
+        if self.extra_rows:                 # «📎 файл» и прочее, что добавляет бот
+            try:
+                rows += self.extra_rows(answer)
+            except Exception:
+                log.exception("доп. кнопки хода %s", self.job_id)
+        markup = InlineKeyboardMarkup(rows) if rows else None
         last = chunks[-1] + "\n\n" + extras
         if render.visible_len(last) > render.LIMIT:      # цитаты не влезли — отдельным последним сообщением
             chunks.append(extras)
