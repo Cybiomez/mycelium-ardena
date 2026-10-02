@@ -4,8 +4,8 @@
   1. Когда — Сегодня / Завтра / другая дата (календарь);
   2. Час, затем минуты с шагом 10 (сегодня — только будущее время);
   3. Повтор — один раз / каждый день / по будням / каждую неделю / каждый месяц;
-  4. Текст — следующим сообщением (в чужом чате — ответом на сообщение мастера:
-     там бот видит только обращения к себе).
+  4. Текст — только ответом (reply) на сообщение мастера, первым таким ответом. Обычные
+     сообщения в теме мастер не перехватывает — они идут как вопросы (просьба Алексея).
 На каждом шаге — «← Назад» и «✖ Отмена». Состояние — в памяти процесса, живёт 30 минут.
 """
 import calendar
@@ -34,7 +34,6 @@ class Wizard:
         self.b = bot
         self.tz = ZoneInfo(bot.cfg.tz)
         self.state: dict[str, dict] = {}          # wid -> состояние мастера
-        self.waiting: dict[tuple, str] = {}       # (chat, thread) -> wid, ждём текст
 
     # ---------- общее ----------
     def _now(self):
@@ -46,9 +45,7 @@ class Wizard:
             self._drop(w)
 
     def _drop(self, wid):
-        s = self.state.pop(wid, None)
-        if s:
-            self.waiting.pop((s["chat"], s["thread"]), None)
+        self.state.pop(wid, None)
 
     def _title(self, s):
         what = "🔔 Новое напоминание" if s["kind"] == "remind" else "🤖 Новое задание"
@@ -195,10 +192,8 @@ class Wizard:
     async def step_text(self, wid):
         s = self.state[wid]
         s["step"] = "text"
-        self.waiting[(s["chat"], s["thread"])] = wid
         what = "о чём напомнить" if s["kind"] == "remind" else "что мне сделать в срок"
-        how = ("<b>ответом (reply) на это сообщение</b> — в этом чате я вижу только обращения ко мне"
-               if s["foreign"] else "следующим сообщением")
+        how = "<b>ответом (reply) на это сообщение</b> — другие сообщения пойдут как обычные вопросы"
         back = "repeatback" if s.get("hour") is not None else "day"
         await self._show(wid, f"<i>Шаг 4 из 4.</i> Напишите, {what}, {how}.", [self._nav(wid, back=back)])
 
@@ -237,7 +232,6 @@ class Wizard:
             s.update(dt=self._now() + timedelta(minutes=int(arg)), hour=None, repeat=None)
             return await self.step_text(wid)
         if action == "repeatback":
-            self.waiting.pop((s["chat"], s["thread"]), None)
             return await self.step_repeat(wid)
         if action == "r":
             dt = s["dt"]
@@ -256,21 +250,18 @@ class Wizard:
 
     # ---------- текст ----------
     def wants_text(self, msg) -> str | None:
-        """Это сообщение — текст для открытого мастера? → wid."""
-        thread = msg.message_thread_id if msg.is_topic_message else None
-        wid = self.waiting.get((msg.chat.id, thread))
-        if not wid:
-            r = msg.reply_to_message
-            if r:
-                wid = next((w for w, s in self.state.items() if s["msg"] == r.message_id
-                            and s["chat"] == msg.chat.id and s["step"] == "text"), None)
-        return wid if wid in self.state else None
+        """Это ответ (reply) на сообщение мастера, ждущего текст? → wid. Иначе None."""
+        r = msg.reply_to_message
+        if not r:
+            return None
+        return next((w for w, s in self.state.items() if s["msg"] == r.message_id
+                     and s["chat"] == msg.chat.id and s["step"] == "text"), None)
 
     async def take_text(self, msg, wid, text):
         s = self.state[wid]
         text = (text or "").strip()
         if not text:
-            return await self.b.out.send(s["chat"], "Нужен текст — напишите, о чём напомнить.",
+            return await self.b.out.send(s["chat"], "Нужен текст — ответьте на сообщение мастера, о чём напомнить.",
                                          thread_id=s["thread"], html_mode=False)
         self._drop(wid)
         due = int(s["dt"].timestamp())
