@@ -237,11 +237,7 @@ class Planner:
             await self._close(msg, f"🗑 <s>{render.esc(r['text'])}</s> — удалено")
             return await cq.answer("Удалено")
         if action == "no":                    # вернуть кнопки: у самого напоминания — основные, у итога мастера — свои
-            if r["msg_id"] == msg.message_id:
-                kb = self._markup(r)
-            else:
-                kb = InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Удалить", callback_data=f"rmd:ask:{rid}"),
-                                            InlineKeyboardButton("📋 Все напоминания", callback_data="rl:list")]])
+            kb = self._markup(r) if r["msg_id"] == msg.message_id else self.confirm_view(r)[1]
             await b.out.call(b.app.bot.edit_message_reply_markup, chat_id=msg.chat.id,
                              message_id=msg.message_id, reply_markup=kb)
             return await cq.answer("Оставил")
@@ -295,6 +291,20 @@ class Planner:
         r = self.b.store.rem_add(kind, text, due, repeat=repeat, topic_id=topic_id, note=note,
                                  settings=settings, source=source)
         return r
+
+    def confirm_view(self, r):
+        """Подтверждение созданного напоминания (итог мастера и быстрой формы) с кнопками
+        «Удалить · Список · Закрыть». Из списка по «← Назад» возвращаемся сюда же."""
+        rep = schedule.describe_repeat(json.loads(r["repeat"])) if r["repeat"] else ""
+        head = "🔔 Готово, напомню" if r["kind"] == "remind" else "🤖 Готово, задание запланировано"
+        text = (f"{head}: <b>{render.esc(schedule.fmt(r['due_at'], self.b.cfg.tz))}</b>"
+                f"{' (' + render.esc(rep) + ')' if rep else ''}\n"
+                f"Куда: {render.esc(self.where_name(r))}\n«{render.esc(r['text'])}»")
+        b = InlineKeyboardButton
+        kb = InlineKeyboardMarkup([[b("🗑 Удалить", callback_data=f"rmd:ask:{r['id']}"),
+                                    b("📋 Список", callback_data=f"rl:list:{r['id']}"),
+                                    b("✖ Закрыть", callback_data="rl:close")]])
+        return text, kb
 
     def describe(self, r, num=None, with_id=False) -> str:
         """num — порядковый номер в списке для человека; with_id — внутренний id (для моих

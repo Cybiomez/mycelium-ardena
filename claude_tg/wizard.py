@@ -269,11 +269,5 @@ class Wizard:
             due = int(time.time()) + 60
         r = self.b.planner.create(s["kind"], text, due, repeat=s.get("repeat"), topic_id=s["topic_id"],
                                   source="user")
-        done = "🔔 Готово, напомню" if s["kind"] == "remind" else "🤖 Готово, задание запланировано"
-        rep = schedule.describe_repeat(s.get("repeat"))
-        body = (f"{done}: <b>{render.esc(schedule.fmt(due, self.b.cfg.tz))}</b>"
-                f"{' (' + render.esc(rep) + ')' if rep else ''}\n"
-                f"Куда: {render.esc(s['where'])}\n«{render.esc(text)}»")
-        kb = InlineKeyboardMarkup([[B("🗑 Удалить", callback_data=f"rmd:ask:{r['id']}"),
-                                    B("📋 Все напоминания", callback_data="rl:list")]])
+        body, kb = self.b.planner.confirm_view(r)
         await self.b.out.edit(body, chat_id=s["chat"], message_id=s["msg"], markup=kb)

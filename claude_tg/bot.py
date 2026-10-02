@@ -965,42 +965,42 @@ class ClaudeTG:
                                    html_mode=False)
         r = self.planner.create(kind, text, due, repeat=repeat,
                                 topic_id=topic["id"] if topic and topic["kind"] == "dialog" else None, source="user")
-        rep_ = schedule.describe_repeat(repeat)
-        head = "🔔 Готово, напомню" if kind == "remind" else "🤖 Готово, задание запланировано"
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Удалить", callback_data=f"rmd:ask:{r['id']}"),
-                                    InlineKeyboardButton("📋 Все напоминания", callback_data="rl:list")]])
-        await reply(f"{head}: <b>{render.esc(schedule.fmt(due, self.cfg.tz))}</b>"
-                    f"{' (' + render.esc(rep_) + ')' if rep_ else ''}\n"
-                    f"Куда: {render.esc(self.planner.where_name(r))}\n«{render.esc(text)}»", kb)
+        await reply(*self.planner.confirm_view(r))
 
-    def render_reminders(self):
-        """Список для человека: порядковые номера, удаление с подтверждением, «➕ Новое»."""
+    def render_reminders(self, origin=0):
+        """Список для человека: порядковые номера, удаление с подтверждением, «➕ Новое», «✖ Закрыть».
+        origin — id напоминания, из подтверждения которого пришли: тогда есть «← Назад» к нему."""
         rows = self.store.rem_active()[:15]
         b = InlineKeyboardButton
-        if not rows:
-            return ("Активных напоминаний и заданий нет.",
-                    InlineKeyboardMarkup([[b("➕ Новое напоминание", callback_data="rl:new")]]))
         kb, line = [], []
         for n, r in enumerate(rows, 1):
-            line.append(b(f"🗑 {n}", callback_data=f"rl:ask:{r['id']}"))
+            line.append(b(f"🗑 {n}", callback_data=f"rl:ask:{r['id']}:{origin}"))
             if len(line) == 5:
                 kb.append(line); line = []
         if line:
             kb.append(line)
         kb.append([b("➕ Новое напоминание", callback_data="rl:new")])
+        last = [b("✖ Закрыть", callback_data="rl:close")]
+        if origin:
+            last.insert(0, b("← Назад", callback_data=f"rl:back:{origin}"))
+        kb.append(last)
+        if not rows:
+            return "Активных напоминаний и заданий нет.", InlineKeyboardMarkup(kb)
         text = ("<b>Напоминания и задания</b>\n" +
                 "\n".join(render.esc(self.planner.describe(r, num=n)) for n, r in enumerate(rows, 1)) +
                 "\n\n<i>🗑 N — удалить пункт N (спрошу подтверждение).</i>")
         return text, InlineKeyboardMarkup(kb)
 
     async def cmd_reminders(self, reply):
-        text, kb = self.render_reminders()
-        await reply(text, kb)
+        await reply(*self.render_reminders())
 
     async def on_list_button(self, cq, rest):
-        action, _, arg = rest.partition(":")
+        """rl:new · rl:close · rl:list[:origin] · rl:ask:<id>[:origin] · rl:yes:<id>[:origin] · rl:back:<origin>"""
+        parts = rest.split(":")
+        action = parts[0]
         m = cq.message
         b = InlineKeyboardButton
+        edit = lambda text, kb: self.out.edit(text, chat_id=m.chat.id, message_id=m.message_id, markup=kb)
         if action == "new":
             await cq.answer()
             thread = m.message_thread_id if m.is_topic_message else None
@@ -1011,23 +1011,36 @@ class ClaudeTG:
             else:
                 place = Place("foreign", m.chat.id, thread, None, None)
             return await self.wizard.start(place, "remind")
+        if action == "close":                 # убрать кнопки — остаётся просто сообщение
+            await cq.answer()
+            return await self.out.call(self.app.bot.edit_message_reply_markup, chat_id=m.chat.id,
+                                       message_id=m.message_id, reply_markup=None)
+        if action == "back":
+            r = self.store.rem(int(parts[1]))
+            await cq.answer()
+            if r:
+                return await edit(*self.planner.confirm_view(r))
+            return await edit(*self.render_reminders())
+        if action == "list":
+            await cq.answer()
+            return await edit(*self.render_reminders(int(parts[1]) if len(parts) > 1 else 0))
+        origin = int(parts[2]) if len(parts) > 2 else 0
         if action == "ask":
-            r = self.store.rem(int(arg))
-            if not r or r["state"] != "active":
-                await cq.answer("Уже удалено.")
-            else:
+            r = self.store.rem(int(parts[1]))
+            if r and r["state"] == "active":
                 await cq.answer()
-                kb = InlineKeyboardMarkup([[b("Да, удалить", callback_data=f"rl:yes:{r['id']}"),
-                                            b("Нет", callback_data="rl:list")]])
-                return await self.out.edit(f"Удалить напоминание?\n«{render.esc(r['text'])}»",
-                                           chat_id=m.chat.id, message_id=m.message_id, markup=kb)
-        if action == "yes":
-            self.store.rem_update(int(arg), state="cancelled")
+                kb = InlineKeyboardMarkup([[b("Да, удалить", callback_data=f"rl:yes:{r['id']}:{origin}"),
+                                            b("Нет", callback_data=f"rl:list:{origin}")]])
+                return await edit(f"Удалить напоминание?\n«{render.esc(r['text'])}»", kb)
+            await cq.answer("Уже удалено.")
+        elif action == "yes":
+            self.store.rem_update(int(parts[1]), state="cancelled")
             await cq.answer("Удалено")
+            if origin == int(parts[1]):       # удалили то самое, откуда пришли — «Назад» вести некуда
+                origin = 0
         else:
             await cq.answer()
-        text, kb = self.render_reminders()
-        await self.out.edit(text, chat_id=m.chat.id, message_id=m.message_id, markup=kb)
+        await edit(*self.render_reminders(origin))
 
     async def cmd_usage(self, reply):
         u = await self.daemon.usage()
