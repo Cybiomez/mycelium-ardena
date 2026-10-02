@@ -82,6 +82,18 @@ class Daemon:
     async def answer(self, session_id, answers):
         return await self._req("POST", f"/api/sessions/{session_id}/answer", {"answers": answers})
 
+    async def permission(self, session_id, request_id, decision):
+        """decision: allow | always (больше не спрашивать этот инструмент) | deny"""
+        return await self._req("POST", f"/api/sessions/{session_id}/permission",
+                               {"requestId": request_id, "decision": decision})
+
+    async def plan(self, session_id, request_id, approve, feedback=""):
+        return await self._req("POST", f"/api/sessions/{session_id}/plan",
+                               {"requestId": request_id, "approve": approve, "feedback": feedback})
+
+    async def fork(self, session_id, title=None):
+        return (await self._req("POST", f"/api/sessions/{session_id}/fork", {"title": title}))["sessionId"]
+
     async def usage(self):
         return (await self._req("GET", "/api/usage")).get("usage")
 
