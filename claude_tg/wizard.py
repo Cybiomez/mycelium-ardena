@@ -1,7 +1,7 @@
 """Мастер нового напоминания / задания на кнопках (просьба Алексея 02-10-2026).
 
 Одно сообщение, которое меняется по шагам:
-  1. Когда — Сегодня / Завтра / Послезавтра / другая дата (календарь) / «через 30 мин · 1 ч · 3 ч»;
+  1. Когда — Сегодня / Завтра / другая дата (календарь);
   2. Час, затем минуты с шагом 10 (сегодня — только будущее время);
   3. Повтор — один раз / каждый день / по будням / каждую неделю / каждый месяц;
   4. Текст — следующим сообщением (в чужом чате — ответом на сообщение мастера:
@@ -100,17 +100,12 @@ class Wizard:
         s.update(step="day", dt=None, repeat=None)
         today = self._now().date()
         later_today = bool(self._hours(today))
-        rows = []
-        first = [B("Завтра", callback_data=f"rw:{wid}:d:{(today + timedelta(1)).isoformat()}"),
-                 B("Послезавтра", callback_data=f"rw:{wid}:d:{(today + timedelta(2)).isoformat()}")]
+        first = [B("Завтра", callback_data=f"rw:{wid}:d:{(today + timedelta(1)).isoformat()}")]
         if later_today:
             first.insert(0, B("Сегодня", callback_data=f"rw:{wid}:d:{today.isoformat()}"))
-        rows.append(first)
-        rows.append([B("📅 Другая дата", callback_data=f"rw:{wid}:cal:{today.year}-{today.month}")])
-        rows.append([B("через 30 мин", callback_data=f"rw:{wid}:in:30"),
-                     B("через 1 ч", callback_data=f"rw:{wid}:in:60"),
-                     B("через 3 ч", callback_data=f"rw:{wid}:in:180")])
-        rows.append(self._nav(wid))
+        rows = [first,
+                [B("📅 Другая дата", callback_data=f"rw:{wid}:cal:{today.year}-{today.month}")],
+                self._nav(wid)]
         await self._show(wid, prefix + "<i>Шаг 1 из 4.</i> Когда напомнить?", rows)
 
     async def step_calendar(self, wid, year, month):
