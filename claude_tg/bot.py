@@ -173,14 +173,19 @@ class ClaudeTG:
     async def _apply_menu(self):
         """Меню команд «/» — при каждом старте, а не только при /setup: иначе новые команды
         не появляются у Алексея, пока он сам не вызовет /setup. В чужих чатах меню нет."""
-        try:
-            await self.app.bot.delete_my_commands(scope=BotCommandScopeDefault())
-            await self.app.bot.set_my_commands([BotCommand(c, d) for c, d in MENU],
-                                               scope=BotCommandScopeChat(self.cfg.home_chat_id))
-            await self.app.bot.set_my_commands([BotCommand(c, d) for c, d in MENU_PRIVATE],
-                                               scope=BotCommandScopeChat(self.cfg.owner_id))
-        except Exception as e:
-            log.warning("меню команд: %s", e)
+        # Каждая часть — отдельно: личка владельца даёт «Chat not found», пока он не нажал «Старт»
+        # у бота, и это не должно мешать меню группы
+        steps = [("сброс общего", lambda: self.app.bot.delete_my_commands(scope=BotCommandScopeDefault())),
+                 ("группа", lambda: self.app.bot.set_my_commands([BotCommand(c, d) for c, d in MENU],
+                                                                 scope=BotCommandScopeChat(self.cfg.home_chat_id))),
+                 ("личка", lambda: self.app.bot.set_my_commands([BotCommand(c, d) for c, d in MENU_PRIVATE],
+                                                                scope=BotCommandScopeChat(self.cfg.owner_id)))]
+        for name, fn in steps:
+            try:
+                await fn()
+            except Exception as e:
+                log.warning("меню команд (%s): %s%s", name, e,
+                            " — владелец ещё не нажал «Старт» у бота" if name == "личка" else "")
 
     async def _migrate_bot(self, prev_id):
         """Бот сменился. Сообщения прежнего бота новый править не может, поэтому шапки тем
@@ -813,6 +818,13 @@ class ClaudeTG:
         topic = place.topic
         session = topic["session_id"] if topic and topic["session_id"] else None
 
+        if cmd == "start" and place.kind == "private":
+            await self._apply_menu()
+            try:
+                from telegram import MenuButtonCommands
+                await self.app.bot.set_chat_menu_button(chat_id=self.cfg.owner_id, menu_button=MenuButtonCommands())
+            except Exception as e:
+                log.warning("кнопка-меню: %s", e)
         if cmd in ("help", "start"):
             text = {"home": HELP_HOME, "foreign": HELP_FOREIGN, "private": HELP_PRIVATE}[place.kind]
             return await reply(text.replace("{bot}", self.username))
