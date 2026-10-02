@@ -2,11 +2,15 @@
 
   python -m claude_tg                          — бот
   claude-tg unlock                             — снять /panic (только с бокса)
-  claude-tg remind "завтра 9:00 текст" [--topic "Название темы"] [--note путь.md]
-                                               — напоминание из скрипта/cron (без темы — в TGChat)
+  claude-tg remind "завтра 9:00 текст" [--note путь.md] [--topic "Тема" | --personal]
+        Куда: по умолчанию — в тему той сессии Claude, из которой вызвана команда
+        (её id берётся из CLAUDE_CODE_SESSION_ID — он есть у команд любой сессии, и старой,
+        и новой). --personal — в TGChat (личное, не про эту работу). Из cron/скрипта
+        вне сессии — тоже в TGChat.
   claude-tg reminders                          — активные напоминания и задания
 """
 import logging
+import os
 import sys
 
 from . import config
@@ -23,10 +27,12 @@ def _cli_remind(cfg, argv):
         val = argv[i + 1] if i + 1 < len(argv) else None
         argv = argv[:i] + argv[i + 2:]
         return val
-    topic_name, note = take("--topic"), take("--note")
+    personal = "--personal" in argv
+    argv = [a for a in argv if a != "--personal"]
+    topic_name, note, session = take("--topic"), take("--note"), take("--session")
     phrase = " ".join(argv).strip()
     if not phrase:
-        print('Формат: claude-tg remind "завтра 9:00 текст" [--topic "Название темы"]')
+        print('Формат: claude-tg remind "завтра 9:00 текст" [--note путь.md] [--topic "Тема" | --personal]')
         return 2
     try:
         due, repeat, text = schedule.parse(phrase, cfg.tz)
@@ -34,15 +40,25 @@ def _cli_remind(cfg, argv):
         print(f"Время: {e}")
         return 2
     st = Store(cfg.db_path)
-    topic_id = None
+    topic_id, where = None, "TGChat"
     if topic_name:
         rows = st.topic_by_title(cfg.home_chat_id, topic_name)
         if not rows:
             print(f"Нет темы «{topic_name}»")
             return 2
-        topic_id = rows[0]["id"]
+        topic_id, where = rows[0]["id"], f"тема «{topic_name}»"
+    elif not personal:
+        sid = session or os.environ.get("CLAUDE_CODE_SESSION_ID")
+        for t in (st.topics_for_session(sid) if sid else []):
+            if t["kind"] == "dialog":
+                topic_id, where = t["id"], f"тема «{t['title']}»"
+                break
+        else:
+            if sid:
+                where = "TGChat (у этой сессии нет темы в группе)"
     r = st.rem_add("remind", text, due, repeat=repeat, topic_id=topic_id, note=note, source="cli")
-    print(f"#{r['id']} → {schedule.fmt(due, cfg.tz)} МСК {schedule.describe_repeat(repeat)}: {text}")
+    rep = schedule.describe_repeat(repeat)
+    print(f"Напоминание #{r['id']}: {schedule.fmt(due, cfg.tz)} МСК{', ' + rep if rep else ''} → {where}: {text}")
     return 0
 
 

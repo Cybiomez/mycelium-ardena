@@ -951,8 +951,16 @@ class ClaudeTG:
         rows = self.store.rem_active()
         if not rows:
             return await reply("Активных напоминаний и заданий нет.", html_mode=False)
-        kb = [[InlineKeyboardButton(f"🗑 #{r['id']}", callback_data=f"rmd:del:{r['id']}")] for r in rows[:15]]
-        await reply("<b>Напоминания и задания</b>\n" + "\n".join(render.esc(self.planner.describe(r)) for r in rows[:15]),
+        rows = rows[:15]
+        kb, line = [], []
+        for n, r in enumerate(rows, 1):        # кнопка по номеру в списке; внутри — настоящий id
+            line.append(InlineKeyboardButton(f"🗑 {n}", callback_data=f"rmd:del:{r['id']}"))
+            if len(line) == 5:
+                kb.append(line); line = []
+        if line:
+            kb.append(line)
+        await reply("<b>Напоминания и задания</b>\n" +
+                    "\n".join(render.esc(self.planner.describe(r, num=n)) for n, r in enumerate(rows, 1)),
                     InlineKeyboardMarkup(kb))
 
     async def cmd_usage(self, reply):

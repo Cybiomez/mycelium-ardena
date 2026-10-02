@@ -200,13 +200,13 @@ class McpServer:
                         f"{', ' + rep if rep else ''} → {where}."), False
             if name == "reminder_list":
                 rows = self.b.store.rem_active()
-                return ("\n".join(p.describe(r) for r in rows) or "Активных напоминаний и заданий нет."), False
+                return ("\n".join(p.describe(r, with_id=True) for r in rows) or "Активных напоминаний и заданий нет."), False
             if name == "reminder_cancel":
                 r = self.b.store.rem(int(args.get("id", 0)))
                 if not r or r["state"] != "active":
                     return "Не найдено среди активных.", True
                 self.b.store.rem_update(r["id"], state="cancelled")
-                return f"Отменено: {p.describe(r)}", False
+                return f"Отменено: {p.describe(r, with_id=True)}", False
             if name == "message_send":
                 text = (args.get("text") or "").strip()
                 if not text:

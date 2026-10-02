@@ -146,7 +146,7 @@ class Planner:
                 locked = False
             if locked:   # открыта в VS Code — два процесса в одном транскрипте разведут историю
                 if r["nags"] == 0:
-                    await b.out.send(chat, f"⏳ Задание #{r['id']} отложено: сессия сейчас открыта в VS Code. "
+                    await b.out.send(chat, "⏳ Задание отложено: сессия сейчас открыта в VS Code. "
                                      "Повторю через 10 минут.", thread_id=thread, html_mode=False, silent=True)
                 b.store.rem_update(r["id"], due_at=int(now) + LOCK_RETRY, nags=r["nags"] + 1)
                 return
@@ -227,8 +227,11 @@ class Planner:
                                  settings=settings, source=source)
         return r
 
-    def describe(self, r) -> str:
+    def describe(self, r, num=None, with_id=False) -> str:
+        """num — порядковый номер в списке для человека; with_id — внутренний id (для моих
+        инструментов и журнала: по нему отменяют). Человеку id не показываем."""
         icon = "🤖 задание" if r["kind"] == "task" else "🔔"
         rep = schedule.describe_repeat(json.loads(r["repeat"])) if r["repeat"] else ""
         when = schedule.fmt(r["due_at"], self.b.cfg.tz)
-        return f"#{r['id']} {icon} {when}{' (' + rep + ')' if rep else ''} → {self.where_name(r)}: {r['text']}"
+        head = f"#{r['id']} " if with_id else (f"{num}. " if num else "")
+        return f"{head}{icon} {when}{' (' + rep + ')' if rep else ''} → {self.where_name(r)}: {r['text']}"

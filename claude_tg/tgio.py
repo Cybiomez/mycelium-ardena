@@ -13,7 +13,7 @@ import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from telegram import LinkPreviewOptions, ReplyParameters
+from telegram import LinkPreviewOptions
 from telegram.error import BadRequest, RetryAfter
 
 log = logging.getLogger(__name__)
@@ -68,8 +68,8 @@ class Out:
             kw["parse_mode"] = "HTML"
         if thread_id:
             kw["message_thread_id"] = thread_id
-        if reply_to:
-            kw["reply_parameters"] = ReplyParameters(message_id=reply_to, allow_sending_without_reply=True)
+        # reply_to намеренно не используется: ответ-реплай шлёт Алексею лишнее уведомление
+        # (решение 02-10-2026). Параметр оставлен, чтобы не трогать вызовы.
         if markup is not None:
             kw["reply_markup"] = markup
         return await self._call(self.bot.send_message, **kw)
