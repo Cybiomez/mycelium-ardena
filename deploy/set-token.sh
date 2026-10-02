@@ -2,7 +2,7 @@
 # Сменить токен бота: берётся из Vaultwarden через брокер secret, значение нигде не печатается.
 #
 #   export BW_SESSION=$(bw unlock --raw)          # мастер-пароль вводит только владелец
-#   ~/projects/mycelium-claude-tg/deploy/set-token.sh [имя-записи]
+#   ~/projects/mycelium-ardena/deploy/set-token.sh [имя-записи]
 #
 # Имя записи по умолчанию — telegram/mycelium-ardena-bot.
 # Токен проверяется у Telegram (getMe) до записи в конфиг; бот перезапускается,

@@ -1,6 +1,6 @@
-# mycelium-claude-tg — Telegram-бот для работы с Claude Code
+# mycelium-ardena — Ardena, Telegram-бот для работы с Claude Code
 
-Telegram-клиент к [ClaudeDaemon](https://github.com/Cybiomez/mycelium-claude-daemon): работа с ассистентом как в VS Code, но из Telegram.
+**Ardena** (`@ArdenaMcBot`) — Telegram-клиент к [ClaudeDaemon](https://github.com/Cybiomez/mycelium-claude-daemon): работа с ассистентом как в VS Code, но из Telegram.
 
 - **Домашняя супергруппа с темами:** тема = отдельная сессия Claude, у каждой своя модель и свой effort. Список моделей берётся у самого Claude Code, обновляется сам.
 - **Один ход = одно сообщение:** строка состояния («Думаю», «Читаю X», «Выполняю…»), ответ по мере генерации, кнопка «Стоп». В конце — свёрнутые цитаты «Размышления» и «Ход работы».
@@ -9,6 +9,7 @@ Telegram-клиент к [ClaudeDaemon](https://github.com/Cybiomez/mycelium-cla
 - **Личка с ботом** — та же сессия TGChat; пересланные сообщения копятся в буфере контекста.
 - **Инлайн-режим:** `@бот вопрос` в любом диалоге, ответ заменяет сообщение.
 - **Тихие часы** 22:00–08:00 МСК: всё приходит без звука.
+- **Напоминания и задания по расписанию:** мастер `/remind` на кнопках, `/task`, `/reminders`; MCP-инструменты для любой сессии Claude и CLI `claude-tg remind` (ставит в тему вызывающей сессии).
 
 ТЗ: `~/projects/notes/tz-claude-tg-bot.md`.
 
@@ -23,7 +24,9 @@ CLAUDE_TG_OWNER_ID=<ваш id> CLAUDE_TG_HOME_CHAT_ID=<id группы> ./deploy
 
 Затем в General группы: `/setup` — создаст темы TGChat, «Напоминания», «Журнал» и меню команд.
 
-Сменить бота: новый токен в `~/.config/claude-tg/env`, новый бот админом в ту же группу, `sudo systemctl restart mycelium-claude-tg`. Привязки тем сохраняются.
+Сменить бота: токен нового бота — в Vaultwarden, новый бот админом в ту же группу, затем `export BW_SESSION=$(bw unlock --raw)` и `deploy/set-token.sh [запись]`. Привязки тем сохраняются, шапки бот перевыпустит сам.
+
+Служебные имена исторические: сервис `mycelium-claude-tg`, команда `claude-tg`, данные `~/.local/share/claude-tg` — от рабочего имени до выбора «Ardena».
 
 ## Устройство
 
