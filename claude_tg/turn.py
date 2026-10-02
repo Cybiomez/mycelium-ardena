@@ -161,6 +161,11 @@ class Turn:
                 log.warning("правка живого сообщения: %s", e)
 
     async def start_inline(self):
+        if self.on_created:                  # запомнить инлайн-сообщение: после рестарта бот его погасит
+            try:
+                self.on_created(self)
+            except Exception:
+                log.exception("on_created инлайн-хода %s", self.job_id)
         self._ticker = asyncio.create_task(self._tick())
 
     # ---------- события демона ----------

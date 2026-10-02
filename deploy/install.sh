@@ -94,6 +94,18 @@ WantedBy=multi-user.target
 U
 sudo systemctl daemon-reload
 sudo systemctl enable mycelium-claude-tg >/dev/null
+
+# Не перезапускать бота посреди хода: бот держит живые сообщения ходов в памяти,
+# и ответ идущего хода не дошёл бы до Telegram. Ждём до 3 минут; FORCE=1 — без ожидания.
+busy() {
+  local tok; tok="$(cat "$HOME/.claude-pocket/token" 2>/dev/null)" || return 1
+  curl -s -m 5 -H "Authorization: Bearer $tok" http://127.0.0.1:8787/api/queue \
+    | python3 -c 'import json,sys; q=json.load(sys.stdin); sys.exit(0 if q.get("running") or q.get("queued") else 1)' 2>/dev/null
+}
+if [ "${FORCE:-0}" != 1 ] && systemctl is-active --quiet mycelium-claude-tg; then
+  for i in $(seq 1 36); do busy || break; [ "$i" = 1 ] && say "В демоне идёт ход — жду, пока закончится…"; sleep 5; done
+  busy && die "Ход всё ещё идёт — перезапуск отложен. Повторите позже или FORCE=1 ./deploy/install.sh"
+fi
 sudo systemctl restart mycelium-claude-tg
 
 # 5. MCP-сервер бота → в Claude Code (уровень пользователя: виден и VS Code, и сессиям демона).

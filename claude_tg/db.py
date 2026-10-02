@@ -59,11 +59,23 @@ class Store:
             CREATE INDEX IF NOT EXISTS idx_rem_due ON reminders(state, due_at);
             CREATE TABLE IF NOT EXISTS live (
                 job_id INTEGER PRIMARY KEY,        -- живое сообщение хода: чтобы после рестарта
-                chat_id INTEGER NOT NULL,          -- не осталось висеть «Думаю…»
+                chat_id INTEGER,                   -- не осталось висеть «Думаю…»
                 message_id INTEGER,
                 created_at INTEGER NOT NULL
             );
         """)
+        cols = {c[1]: c for c in self.db.execute("PRAGMA table_info(live)")}
+        if "inline_id" not in cols:
+            # Старая схема: chat_id NOT NULL, а у инлайн-хода чата нет. SQLite не снимает NOT NULL
+            # у колонки — пересоздаём таблицу с переносом строк (в ней только идущие ходы).
+            self.db.executescript("""
+                ALTER TABLE live RENAME TO live_old;
+                CREATE TABLE live (job_id INTEGER PRIMARY KEY, chat_id INTEGER, message_id INTEGER,
+                                   created_at INTEGER NOT NULL, inline_id TEXT);
+                INSERT INTO live (job_id, chat_id, message_id, created_at)
+                    SELECT job_id, chat_id, message_id, created_at FROM live_old;
+                DROP TABLE live_old;
+            """)
 
     # ---------- kv ----------
     def kv_get(self, key, default=None):
@@ -161,9 +173,9 @@ class Store:
         return self.db.execute("SELECT * FROM reminders WHERE state = 'active' ORDER BY due_at").fetchall()
 
     # ---------- живые сообщения (переживание рестарта) ----------
-    def live_add(self, job_id, chat_id, message_id):
-        self.db.execute("INSERT OR REPLACE INTO live (job_id, chat_id, message_id, created_at) VALUES (?, ?, ?, ?)",
-                        (job_id, chat_id, message_id, int(time.time())))
+    def live_add(self, job_id, chat_id, message_id, inline_id=None):
+        self.db.execute("INSERT OR REPLACE INTO live (job_id, chat_id, message_id, inline_id, created_at) "
+                        "VALUES (?, ?, ?, ?, ?)", (job_id, chat_id, message_id, inline_id, int(time.time())))
 
     def live_del(self, job_id):
         self.db.execute("DELETE FROM live WHERE job_id = ?", (job_id,))

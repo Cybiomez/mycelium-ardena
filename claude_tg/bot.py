@@ -184,7 +184,8 @@ class ClaudeTG:
         for row in self.store.live_all():
             try:
                 await self.out.edit("⚠ Бот перезапускался — этот ход прерван. Повторите вопрос.",
-                                    chat_id=row["chat_id"], message_id=row["message_id"], html_mode=False)
+                                    chat_id=row["chat_id"], message_id=row["message_id"],
+                                    inline_id=row["inline_id"], html_mode=False)
             except Exception as e:
                 log.debug("recover live %s: %s", row["job_id"], e)
             self.store.live_del(row["job_id"])
@@ -561,7 +562,7 @@ class ClaudeTG:
         turn = Turn(self.out, self.cfg, job_id=job, session_key=res["sessionKey"],
                     chat_id=None if inline_id else place.chat_id, thread_id=place.thread_id,
                     reply_to=None if inline_id else place.reply_to, inline_id=inline_id, on_final=on_final,
-                    on_created=lambda t: self.store.live_add(t.job_id, t.chat_id, t.msg_id),
+                    on_created=lambda t: self.store.live_add(t.job_id, t.chat_id, t.msg_id, t.inline_id),
                     on_done=lambda t: self.store.live_del(t.job_id))
         turn.place, turn.question, turn.inline_type = place, question, inline_type
         turn.topic_id = topic["id"] if topic else None
