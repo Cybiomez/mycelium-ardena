@@ -218,40 +218,49 @@ class Turn:
         self.dirty = True
 
     def _on_assistant(self, blocks):
+        # Весь мой текст идёт в ответ целиком (и пояснения по ходу, и финал) — раньше
+        # промежуточный текст прятался в «Ход работы» и там обрезался (просьба Алексея 02-10).
+        # В «Ход работы» — только действия (инструменты).
         texts = [b["text"] for b in blocks if b.get("type") == "text" and b.get("text", "").strip()]
         tools = [b for b in blocks if b.get("type") == "tool_use"]
         for b in blocks:
             if b.get("type") == "thinking" and b.get("text"):
                 self.thinking += ("\n\n" if self.thinking else "") + b["text"]
+        self.answer_parts.extend(texts)
         if tools:
-            # Текст перед инструментом — промежуточный комментарий, уходит в «Ход работы»
-            for tx in self.answer_parts + texts:
-                self.actions.append("💬 " + _short(tx, 120))
-            self.answer_parts = []
             for tb in tools:
                 d = describe_tool(tb.get("name", ""), tb.get("input") or {})
                 self.actions.append(d)
                 self.status = d
             self.stream = ""
-        elif texts:
-            self.answer_parts.extend(texts)
 
     # ---------- итог ----------
     def _extras(self):
-        """Свёрнутые цитаты: размышления и ход работы (ТЗ §7.1, §7.3)."""
+        """Свёрнутые цитаты: размышления и ход работы (ТЗ §7.1, §7.3).
+        Держимся в пределах одного сообщения Telegram: размышления — последние, ход работы —
+        столько последних строк, сколько влезает (остальное — в счётчике «… и ещё N»)."""
         parts = []
+        budget = render.LIMIT - 200           # запас на заголовки цитат и мету
         if self.thinking.strip():
             th = self.thinking.strip()
             tail = ("…" + th[-THINKING_TAIL:]) if len(th) > THINKING_TAIL else th
             parts.append(render.expandable("💭 Размышления", render.esc(tail)))
-        lines = self.actions[-LOG_LINES:]
-        if len(self.actions) > LOG_LINES:
-            lines = [f"… и ещё {len(self.actions) - LOG_LINES} раньше"] + lines
+            budget -= len(tail)
         meta = [_fmt_dur(time.time() - (self.started or time.time()))]
         if self.model:
             meta.append(self.model)
         if self.context_pct is not None:
             meta.append(f"контекст {round(self.context_pct)}%")
+        lines, used = [], 0
+        for l in reversed(self.actions):      # с конца, пока есть бюджет
+            if used + len(l) + 1 > max(budget, 300):
+                break
+            lines.append(l)
+            used += len(l) + 1
+        lines.reverse()
+        hidden = len(self.actions) - len(lines)
+        if hidden > 0:
+            lines.insert(0, f"… и ещё {hidden} раньше")
         body = "\n".join(render.esc(l) for l in lines)
         body = (body + "\n" if body else "") + "⏱ " + render.esc(" · ".join(meta))
         parts.append(render.expandable(f"🛠 Ход работы · действий: {len(self.actions)}", body))
