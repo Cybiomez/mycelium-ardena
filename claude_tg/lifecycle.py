@@ -4,6 +4,7 @@
 /api/archive, /api/archive/:id/restore). Бот только спрашивает подтверждение,
 убирает и заводит темы. Правила тем — заметка «AI — Темы и сессии».
 """
+import asyncio
 import logging
 import time
 
@@ -156,6 +157,24 @@ class Lifecycle:
         from .bot import Place   # отложенный импорт: bot.py импортирует этот модуль
         place = Place("home", topic["chat_id"], topic["thread_id"], None, topic)
         await b.submit(place, seed, question="🔄 Перезапуск темы")
+        asyncio.create_task(self._keep_title(topic["id"], topic["title"]))
+
+    async def _keep_title(self, topic_id, title, wait=300):
+        """Новой сессии — имя темы: иначе синхронизация переименует тему по авто-имени сессии,
+        и строка «Тема в боте» в заметке «Контекст» перестанет совпадать."""
+        until = time.time() + wait
+        while time.time() < until:
+            t = self.b.store.topic(topic_id)
+            sid = t["session_id"] if t else None
+            if sid and not sid.startswith("new-"):
+                try:
+                    await self.b.daemon.set_title(sid, title)
+                    log.info("новая сессия %s получила имя темы «%s»", sid[:8], title)
+                except DaemonError as e:
+                    log.warning("имя новой сессии: %s", e)
+                return
+            await asyncio.sleep(2)
+        log.warning("новая сессия темы «%s» не получила id за %s с — имя не задано", title, wait)
 
     async def _back(self, topic, edit):
         b, cur = self.b, topic["session_id"]
