@@ -159,6 +159,47 @@ class Lifecycle:
         await b.submit(place, seed, question="🔄 Перезапуск темы")
         asyncio.create_task(self._keep_title(topic["id"], topic["title"]))
 
+    async def handoff(self, old, new):
+        """Передача сессии (навык session-handoff): прежняя — в архив, её тема — новой сессии.
+        Вызывает НОВАЯ сессия после подтверждения Алексея. → текст итога; DaemonError — отказ."""
+        b = self.b
+        if old == new:
+            raise ValueError("старая и новая сессия совпадают")
+        olds = [t for t in b.store.topics_for_session(old) if t["kind"] == "dialog"]
+        news = [t for t in b.store.topics_for_session(new) if t["kind"] == "dialog"]
+        b.hold.update({old, new})
+        try:
+            m = await b.daemon.archive(old, "handoff", olds[0]["title"] if olds else None)
+            if not olds:
+                return f"Прежняя сессия {old[:8]} в архиве до {_date(m['expiresAt'])}; темы в боте у неё не было."
+            topic = olds[0]
+            # Синхронизация могла успеть завести новой сессии свою тему — она лишняя
+            for t in news:
+                try:
+                    await b.out.call(b.app.bot.delete_forum_topic, chat_id=t["chat_id"], message_thread_id=t["thread_id"])
+                except Exception as e:
+                    log.warning("лишняя тема новой сессии: %s", e)
+                b.store.delete_topic(t["id"])
+            b.store.update_topic(topic["id"], session_id=new, pending_settings=None)
+            b.store.kv_set(self._prev_key(topic), old)
+            b.sync.mark_bound(new)
+        finally:
+            b.hold.difference_update({old, new})
+        try:
+            await b.daemon.set_title(new, topic["title"])
+        except DaemonError as e:
+            log.warning("имя новой сессии: %s", e)
+        await b.ensure_header(b.store.topic(topic["id"]))
+        try:
+            await b.out.send(topic["chat_id"], f"🔄 Тема передана новой сессии <code>{new[:8]}</code>. Прежняя "
+                             f"<code>{old[:8]}</code> в архиве до {_date(m['expiresAt'])}, вернуть — /back.",
+                             thread_id=topic["thread_id"], silent=True)
+        except Exception as e:
+            log.warning("итог передачи в теме: %s", e)
+        log.info("передача: %s → %s, тема «%s»", old[:8], new[:8], topic["title"])
+        return (f"Готово: тема «{topic['title']}» теперь у новой сессии, прежняя {old[:8]} в архиве до "
+                f"{_date(m['expiresAt'])} (вернуть — /back в теме).")
+
     async def _keep_title(self, topic_id, title, wait=300):
         """Новой сессии — имя темы: иначе синхронизация переименует тему по авто-имени сессии,
         и строка «Тема в боте» в заметке «Контекст» перестанет совпадать."""
