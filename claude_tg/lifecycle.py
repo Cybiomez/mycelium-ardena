@@ -120,8 +120,11 @@ class Lifecycle:
             log.warning("удалить тему %s: %s", title, e)
         b.store.delete_topic(topic["id"])
         note = f" Прежняя сессия <code>{prev[:8]}</code> остаётся в архиве до своего срока." if prev else ""
-        await b.out.send(b.cfg.home_chat_id, f"🗑 Тема «{render.esc(title)}» удалена, {tail}.{note}", silent=True)
         log.info("тема удалена: %s (%s)", title, (sess or "-")[:8])
+        try:   # итог в General — сопроводительный: его сбой не отменяет уже сделанное удаление
+            await b.out.send(b.cfg.home_chat_id, f"🗑 Тема «{render.esc(title)}» удалена, {tail}.{note}", silent=True)
+        except Exception as e:
+            log.warning("итог удаления в General: %s", e)
 
     async def _fresh(self, topic, edit):
         b, old = self.b, topic["session_id"]
