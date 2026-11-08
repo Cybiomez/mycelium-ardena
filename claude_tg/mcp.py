@@ -91,6 +91,17 @@ TOOLS = [
         "inputSchema": {"type": "object", "required": ["title"], "properties": {"title": {"type": "string"}}},
     },
     {
+        "name": "session_handoff",
+        "description": "Передача сессии: вызывает НОВАЯ сессия после явного подтверждения Алексея. "
+                       "Прежняя сессия (from_session — её полный id) целиком уходит в архив на 90 дней, "
+                       "её тема в боте переходит к текущей сессии. Откажет, если прежняя ещё открыта "
+                       "в VS Code или в ней идёт ход — тогда попросить закрыть вкладку и повторить. "
+                       "to_session — id текущей сессии (`echo $CLAUDE_CODE_SESSION_ID` в Bash): бот сверяет его "
+                       "со своим определением и при расхождении ничего не делает.",
+        "inputSchema": {"type": "object", "required": ["from_session", "to_session"], "properties": {
+            "from_session": {"type": "string"}, "to_session": {"type": "string"}}},
+    },
+    {
         "name": "message_send",
         "description": "Написать Алексею в Telegram прямо сейчас — например, доложить итог долгой работы, "
                        "не дожидаясь вопроса. Разметка markdown переводится в разметку Telegram.",
@@ -230,6 +241,20 @@ class McpServer:
                 except DaemonError as e:
                     return f"Не удалено: {e}", True
                 return f"Тема «{title}» удалена, сессия — в архиве на 90 дней.", False
+            if name == "session_handoff":
+                old = (args.get("from_session") or "").strip()
+                new = (args.get("to_session") or "").strip()
+                if not caller or caller != new:
+                    return (f"Отказ: to_session {new[:8] or '—'} не совпадает с сессией, которую определил бот "
+                            f"({(caller or '—')[:8]}). Ничего не изменено.", True)
+                try:
+                    return await self.b.lifecycle.handoff(old, caller), False
+                except DaemonError as e:
+                    s = str(e)
+                    if "HTTP 409" in s:
+                        return ("Прежняя сессия занята: открыта в VS Code / терминале или в ней идёт ход. "
+                                "Попросите Алексея закрыть её вкладку и повторите."), True
+                    return f"Не передано: {s}", True
             if name == "message_send":
                 text = (args.get("text") or "").strip()
                 if not text:
