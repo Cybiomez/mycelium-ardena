@@ -31,16 +31,11 @@ from .planner import Planner
 from .lifecycle import Lifecycle
 from .sync import Sync
 from . import files
-from .decisions import Decisions
 from .tgio import Out
 from .wizard import Wizard
 from .turn import Turn
 
 log = logging.getLogger(__name__)
-
-# Режимы прав: значение в демоне → подпись. «С подтверждением» и «План» — с кнопками решений
-MODES = [("bypassPermissions", "Авто"), ("default", "С подтверждением"), ("plan", "План")]
-MODE_NAME = dict(MODES)
 
 # Реакции — только из списка, разрешённого Telegram (⏳ и 📎 в нём нет)
 REACT_QUEUED = "👀"
@@ -134,7 +129,6 @@ class ClaudeTG:
         self._sync_task = None
         self.planner = Planner(self)
         self.wizard = Wizard(self)
-        self.decisions = Decisions(self)
         self.lifecycle = Lifecycle(self)
         self._planner_task = None
         self.mcp = McpServer(self, int(os.environ.get("CLAUDE_TG_MCP_PORT", "8790")))
@@ -314,9 +308,6 @@ class ClaudeTG:
                 await self.out.send(chat.id, "🔒 Бот заблокирован командой /panic. Снять — на боксе: "
                                     "<code>claude-tg unlock</code>", thread_id=self._thread(msg))
             return
-        rid = self.decisions.wants_fix(msg)
-        if rid and not text.strip().startswith("/"):
-            return await self.decisions.take_fix(msg, rid, self._untag(text) if self._tagged(text) else text)
         wid = self.wizard.wants_text(msg)
         if wid and not (text.strip().startswith("/") or (self._tagged(text) and self._untag(text).startswith("/"))):
             return await self.wizard.take_text(msg, wid, self._untag(text) if self._tagged(text) else text)
@@ -731,8 +722,6 @@ class ClaudeTG:
             return
         if t == "question":
             await self.on_question(sess, ev.get("questions") or [], turn)
-        if t in ("permission", "plan"):
-            await self.decisions.on_event(t, sess, ev, turn)
         if t == "context":
             for tp in self.store.topics_for_session(sess):
                 pct = (ev.get("context") or {}).get("percentage")
@@ -791,8 +780,7 @@ class ClaudeTG:
         title = "TGChat" if topic["kind"] == "tgchat" else (topic["title"] or "Тема")
         lines = [f"🧵 <b>{render.esc(title)}</b>",
                  f"Модель: {render.esc(await self._model_name(s.get('model')))} · effort: "
-                 f"{render.esc(s.get('effort') or 'по умолчанию')} · режим: "
-                 f"{render.esc(MODE_NAME.get(s.get('permissionMode') or 'bypassPermissions', 'Авто'))}"]
+                 f"{render.esc(s.get('effort') or 'по умолчанию')}"]
         tail = []
         if pct is not None:
             tail.append(f"контекст {pct}%")
@@ -1221,18 +1209,13 @@ class ClaudeTG:
             rows.append([InlineKeyboardButton(("● " if eff is None else "") + "авто", callback_data=f"set:{tid}:e:-")] +
                         [InlineKeyboardButton(("● " if eff == lv else "") + lv, callback_data=f"set:{tid}:e:{lv}")
                          for lv in levels])
-        mode = cur.get("permissionMode") or "bypassPermissions"
-        rows.append([InlineKeyboardButton(("● " if mode == v else "") + name, callback_data=f"set:{tid}:p:{v}")
-                     for v, name in MODES])
         title = "по умолчанию для новых тем" if not topic else \
             ("TGChat" if topic["kind"] == "tgchat" else topic["title"] or "тема")
         text = (f"⚙ <b>Настройки — {render.esc(title)}</b>\n"
                 f"Модель: {render.esc(await self._model_name(model))}\n"
                 f"Effort: {render.esc(cur.get('effort') or 'авто')}"
                 + ("" if levels else " (эта модель effort не поддерживает)") +
-                f"\nРежим прав: {render.esc(MODE_NAME.get(mode, 'Авто'))}"
-                "\n<i>Авто — без вопросов; С подтверждением — спрошу перед правками и командами; "
-                "План — сначала план на утверждение. Действует со следующего хода.</i>")
+                "\n<i>Действует со следующего хода.</i>")
         return text, InlineKeyboardMarkup(rows)
 
     async def apply_setting(self, tid, what, value):
@@ -1245,13 +1228,13 @@ class ClaudeTG:
             levels = (info or {}).get("supportedEffortLevels") or []
             if cur.get("effort") and cur["effort"] not in levels:
                 change["effort"] = None   # новая модель этот effort не умеет — сброс (ТЗ §6 п. 5)
-        elif what == "p":
-            change["permissionMode"] = value if value in MODE_NAME else "bypassPermissions"
+        elif what == "p":       # старые кнопки режимов (режимы убраны 08-11-2026) — только «Авто»
+            return topic
         else:
             change["effort"] = None if value == "-" else value
         if not topic:
             cur.update(change)
-            self.store.kv_set("defaults", {k: v for k, v in cur.items() if k in ("model", "effort", "permissionMode")})
+            self.store.kv_set("defaults", {k: v for k, v in cur.items() if k in ("model", "effort")})
             return None
         if topic["session_id"]:
             await self.daemon.set_settings(topic["session_id"], **{k: (v if v is not None else "") for k, v in change.items()})
@@ -1274,11 +1257,6 @@ class ClaudeTG:
         try:
             if kind == "noop":
                 return await cq.answer()
-            if kind in ("pm", "pl"):          # решения: pm:<requestId>:a|al|d · pl:<requestId>:ok|fix|nofb
-                rid, _, action = rest.rpartition(":")
-                if kind == "pl" and action == "nofb":
-                    return await self.decisions.no_feedback(cq, rid)
-                return await self.decisions.on_button(cq, kind, rid, action)
             if kind == "fs":                  # «📎 файл» под ответом
                 return await self.send_file(cq, rest)
             if kind == "rw":                  # мастер нового напоминания: rw:<wid>:<шаг>[:<значение>]
