@@ -103,6 +103,16 @@ class Daemon:
     async def set_title(self, session_id, title):
         return await self._req("POST", f"/api/sessions/{session_id}/title", {"title": title})
 
+    # ---------- архив сессий (демон ≥ 0.4.0) ----------
+    async def archive(self, session_id, reason="delete", topic=None):
+        return await self._req("POST", f"/api/sessions/{session_id}/archive", {"reason": reason, "topic": topic})
+
+    async def archive_list(self):
+        return (await self._req("GET", "/api/archive")).get("archive") or []
+
+    async def restore(self, session_id):
+        return await self._req("POST", f"/api/archive/{session_id}/restore", {})
+
     async def upload(self, name, mime, b64):
         return await self._req("POST", "/api/upload", {"name": name, "mime": mime, "base64": b64}, timeout=120)
 
