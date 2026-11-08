@@ -104,7 +104,7 @@ class Sync:
             # Сессия только что создана ботом и ещё не получила свой id — не дублировать
             if pending_new and now - s.get("mtime", 0) < 120_000:
                 continue
-            if sid in b.active or any(sid in tr.sessions for tr in b.turns.values()):
+            if sid in b.active or sid in b.hold or any(sid in tr.sessions for tr in b.turns.values()):
                 continue
             name = title if title and title != "(без названия)" else f"Сессия {sid[:8]}"
             twins = [r for r in b.store.topic_by_title(b.cfg.home_chat_id, name) if not r["session_id"]]

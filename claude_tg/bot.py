@@ -28,6 +28,7 @@ from .daemon import Daemon, DaemonError
 from .db import Store
 from .mcp import McpServer
 from .planner import Planner
+from .lifecycle import Lifecycle
 from .sync import Sync
 from . import files
 from .decisions import Decisions
@@ -52,11 +53,13 @@ HELP_HOME = (
     "/settings — модель и effort сессии\n"
     "/stop — прервать ход · /context — контекст и сжатие\n"
     "/rename Название — переименовать тему и сессию · /fork — развилка темы\n"
+    "/fresh — начать тему с новой сессии (прежняя в архив) · /back — вернуть прежнюю\n"
+    "/delete — удалить тему и сессию (архив 90 дней, потом безвозвратно)\n"
     "/mirror on|off — дублировать в тему ходы из VS Code/чужих чатов\n"
     "/queue — очередь · /usage — лимиты подписки\n"
     "/remind — новое напоминание: выбор даты и времени кнопками (или быстро: /remind завтра 9:00 текст)\n"
     "/task — задание мне по расписанию, так же · /reminders — список, удаление\n"
-    "В General: /new Название · /attach · /topics · /defaults · /setup\n"
+    "В General: /new Название · /attach · /topics · /archive · /defaults · /setup\n"
     "/panic — аварийный стоп (снять — только с бокса)"
 )
 HELP_FOREIGN = (
@@ -75,6 +78,7 @@ MENU = [   # описания короткие: в группе Telegram пок�
     ("remind", "Напоминание"), ("reminders", "Напоминания"), ("task", "Задание мне"),
     ("settings", "Модель, effort"), ("stop", "Прервать ход"), ("context", "Контекст"),
     ("queue", "Очередь"), ("usage", "Лимиты"), ("rename", "Переименовать"), ("fork", "Развилка темы"), ("mirror", "Дублирование"),
+    ("fresh", "Новая сессия темы"), ("back", "Прежняя сессия"), ("delete", "Удалить тему"), ("archive", "Архив сессий"),
     ("new", "Новая тема"), ("attach", "Сессию в тему"), ("topics", "Темы"), ("defaults", "Настройки тем"),
     ("help", "Справка"),
 ]
@@ -122,6 +126,7 @@ class ClaudeTG:
         self.confirm: dict[str, dict] = {}        # uuid -> отложенный ход (сессия открыта в VS Code)
         self.albums: dict[str, list] = {}         # media_group_id -> сообщения альбома
         self.bot_created: set[int] = set()        # thread_id тем, созданных самим ботом (гонка с событием)
+        self.hold: set[str] = set()               # сессии, которые сейчас уходят в архив / возвращаются — sync их не трогает
         self.models_cache: list = []
         self._header_at: dict[int, float] = {}
         self._listen_task = None
@@ -130,6 +135,7 @@ class ClaudeTG:
         self.planner = Planner(self)
         self.wizard = Wizard(self)
         self.decisions = Decisions(self)
+        self.lifecycle = Lifecycle(self)
         self._planner_task = None
         self.mcp = McpServer(self, int(os.environ.get("CLAUDE_TG_MCP_PORT", "8790")))
         # Отправка хода и разбор событий — под одной блокировкой: иначе события нового хода
@@ -857,6 +863,12 @@ class ClaudeTG:
             return await self.cmd_attach(reply)
         if cmd == "topics":
             return await self.cmd_topics(reply)
+        if cmd == "archive":
+            if place.kind != "home":
+                return await reply("/archive — в домашней группе.", html_mode=False)
+            return await self.lifecycle.cmd_archive(reply)
+        if cmd in ("delete", "fresh", "back"):
+            return await self.lifecycle.cmd(cmd, reply, place, topic)
         if cmd == "defaults":
             return await reply(*await self.settings_view(None))
         if cmd == "usage":
@@ -1292,6 +1304,9 @@ class ClaudeTG:
                 return await cq.answer("Сохранено")
             if kind == "att":
                 return await self._attach_pick(cq, rest)
+            if kind == "lc":                  # жизненный цикл сессии: lc:del|fresh|back|no:<topic_id> · lc:res:<session_id>
+                action, _, arg = rest.partition(":")
+                return await self.lifecycle.on_button(cq, action, arg)
             if kind == "cancel":
                 ok = await self.daemon.cancel(int(rest))
                 return await cq.answer("Убрано из очереди" if ok else "Уже выполняется или завершён")

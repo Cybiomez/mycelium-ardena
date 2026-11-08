@@ -20,6 +20,7 @@ from aiohttp import web
 from pathlib import Path
 
 from . import caller as callers, render, schedule
+from .daemon import DaemonError
 
 log = logging.getLogger(__name__)
 
@@ -81,6 +82,13 @@ TOOLS = [
         "name": "reminder_cancel",
         "description": "Отменить напоминание или задание по id (из reminder_list).",
         "inputSchema": {"type": "object", "required": ["id"], "properties": {"id": {"type": "integer"}}},
+    },
+    {
+        "name": "topic_delete",
+        "description": "Удалить тему-диалог и её сессию: сессия целиком уходит в архив на 90 дней (потом безвозвратно), "
+                       "тема исчезает из группы. ТОЛЬКО по прямой просьбе Алексея удалить эту тему. "
+                       "title — точное название темы. Свою (текущую) тему удалить нельзя.",
+        "inputSchema": {"type": "object", "required": ["title"], "properties": {"title": {"type": "string"}}},
     },
     {
         "name": "message_send",
@@ -207,6 +215,21 @@ class McpServer:
                     return "Не найдено среди активных.", True
                 self.b.store.rem_update(r["id"], state="cancelled")
                 return f"Отменено: {p.describe(r, with_id=True)}", False
+            if name == "topic_delete":
+                title = (args.get("title") or "").strip()
+                rows = [r for r in self.b.store.topic_by_title(self.b.cfg.home_chat_id, title) if r["kind"] == "dialog"]
+                if not rows:
+                    return f"Нет темы «{title}».", True
+                if len(rows) > 1:
+                    return f"Тем «{title}» несколько ({len(rows)}) — удалите нужную командой /delete в ней.", True
+                t = rows[0]
+                if caller and t["session_id"] == caller:
+                    return "Это тема текущей сессии — её удаляют командой /delete в самой теме.", True
+                try:
+                    await self.b.lifecycle._delete(t)
+                except DaemonError as e:
+                    return f"Не удалено: {e}", True
+                return f"Тема «{title}» удалена, сессия — в архиве на 90 дней.", False
             if name == "message_send":
                 text = (args.get("text") or "").strip()
                 if not text:
