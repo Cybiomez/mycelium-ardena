@@ -196,7 +196,8 @@ class Planner:
         return InlineKeyboardMarkup(rows)
 
     async def _picker(self, msg, r, day, hour=None):
-        when = "сегодня" if day == 0 else "завтра"
+        d = (datetime.now(self.tz) + timedelta(days=day)).strftime("%d.%m")
+        when = f"сегодня, {d}" if day == 0 else f"завтра, {d}"   # дата явно: после полуночи «завтра» неочевидно
         step = "выберите час" if hour is None else f"выберите минуты ({hour:02d}:…)"
         text = self._text(r) + f"\n\n🕐 <i>Перенести на {when}: {step}</i>"
         await self.b.out.edit(text, chat_id=msg.chat.id, message_id=msg.message_id,
@@ -208,7 +209,10 @@ class Planner:
         if r["repeat"]:   # у повторяющегося переносим только этот раз — отдельной разовой копией
             b.store.rem_add("remind", r["text"], ts, topic_id=r["topic_id"], note=r["note"], source="snooze")
         else:
-            b.store.rem_update(r["id"], due_at=ts, nags=0)
+            # Перенос = «напомни снова»: возвращаем в работу, даже если напоминание уже было
+            # закрыто или удалено (кнопки старого сообщения живут дальше). Урок 12-11-2026:
+            # перенос удалённого #28 менял время, а state оставался cancelled — молча не пришло бы.
+            b.store.rem_update(r["id"], due_at=ts, nags=0, state="active")
         await self._close(msg, f"⏰ {render.esc(r['text'])} — перенесено на {schedule.fmt(ts, b.cfg.tz)}")
 
     async def on_button(self, cq, action, rid, extra=()):
